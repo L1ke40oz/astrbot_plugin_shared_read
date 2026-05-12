@@ -90,13 +90,6 @@ class WebUIServer:
                 name="custom-static",
             )
 
-        if self.default_templates_dir.exists():
-            app.mount(
-                "/static",
-                StaticFiles(directory=self.default_templates_dir),
-                name="static",
-            )
-
         # serve user assets (images, etc.) from plugin_data/assets/
         if self.assets_dir and self.assets_dir.exists():
             app.mount(
@@ -127,6 +120,14 @@ class WebUIServer:
             if not path:
                 raise HTTPException(404)
             return FileResponse(path, media_type="application/javascript")
+
+        # serve planet.png (and other template images) directly
+        @app.get("/static/{filename:path}")
+        async def serve_static_file(filename: str):
+            path = self.default_templates_dir / filename
+            if path.exists() and path.is_file():
+                return FileResponse(path)
+            raise HTTPException(404)
 
         # --- Frontend config API ---
 
