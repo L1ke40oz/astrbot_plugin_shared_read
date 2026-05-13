@@ -118,13 +118,13 @@
         <div class="shelf-header">
           <span class="shelf-title">书架</span>
           <button class="btn-upload" id="btn-upload">+ 上传</button>
-          <input type="file" id="file-input" accept=".epub,.txt" hidden />
+          <input type="file" id="file-input" accept=".epub,.txt,.pdf" hidden />
         </div>
         <div class="shelf-grid-wrapper">
           <div class="shelf-grid" id="shelf-grid"></div>
           <div class="shelf-empty" id="shelf-empty">
             <p>还没有书</p>
-            <p class="shelf-empty-hint">上传一本 .epub 开始阅读</p>
+            <p class="shelf-empty-hint">上传 epub / txt / pdf 开始阅读</p>
           </div>
         </div>
         <div class="shelf-nav" id="shelf-nav">
@@ -143,7 +143,7 @@
         <!-- Memory Management (flat style) -->
         <div class="tools-section">
           <div class="tools-section-header">
-            <span class="tools-section-icon">🧠</span>
+            <span class="tools-section-icon">💭</span>
             <span class="tools-section-title">记忆管理</span>
             <span class="tools-section-hint">管理对话记录，删除不需要的记忆</span>
           </div>
@@ -170,7 +170,7 @@
           <!-- Bot chapter memories -->
           <div class="memory-group" id="memory-bot-group">
             <div class="memory-group-header">
-              <span class="memory-group-label">🧠 他的阅读记忆</span>
+              <span class="memory-group-label">💭 他的阅读记忆</span>
               <span class="memory-group-count" id="bot-memory-count">0</span>
             </div>
             <div class="memory-list" id="memory-bot-list">
@@ -196,7 +196,7 @@
           <div class="tools-section-header">
             <span class="tools-section-icon">🏠</span>
             <span class="tools-section-title">宠物屋</span>
-            <span class="tools-section-hint">你的像素小伙伴们</span>
+            <span class="tools-section-hint">你们的像素小伙伴们</span>
           </div>
           <div class="pet-house-container" id="pet-house-container">
             <div class="pet-cards-grid" id="pet-cards-grid">

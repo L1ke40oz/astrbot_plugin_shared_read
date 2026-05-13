@@ -59,16 +59,18 @@ class BookManager:
         return sorted(books, key=lambda b: b["added_at"], reverse=True)
 
     def add_book(self, filename: str, file_bytes: bytes) -> dict[str, Any]:
-        """Add an epub or txt book to the library."""
+        """Add an epub, txt, or pdf book to the library."""
         book_id = uuid.uuid4().hex[:10]
 
         if filename.lower().endswith(".txt"):
             return self._add_txt_book(book_id, filename, file_bytes)
         elif filename.lower().endswith(".epub"):
             return self._add_epub_book(book_id, filename, file_bytes)
+        elif filename.lower().endswith(".pdf"):
+            return self._add_pdf_book(book_id, filename, file_bytes)
         else:
             raise ValueError(
-                "Unsupported file format. Only .epub and .txt are supported."
+                "Unsupported file format. Only .epub, .txt, and .pdf are supported."
             )
 
     def _add_txt_book(
@@ -238,6 +240,87 @@ class BookManager:
         book_info = {
             "title": title,
             "author": author,
+            "filename": filename,
+            "chapter_count": len(chapters),
+            "added_at": time.time(),
+        }
+        self.library.setdefault("books", {})[book_id] = book_info
+        self._save_library()
+
+        return {"id": book_id, **book_info}
+
+    def _add_pdf_book(
+        self, book_id: str, filename: str, file_bytes: bytes
+    ) -> dict[str, Any]:
+        """Parse and add a PDF book.
+
+        Uses PyMuPDF (fitz) to extract text page by page.
+        Groups pages into chapters (~10 pages per chapter) for readability.
+        """
+        try:
+            import fitz  # PyMuPDF
+        except ImportError:
+            raise ValueError(
+                "PDF 支持需要安装 PyMuPDF：pip install PyMuPDF"
+            )
+
+        # save pdf file
+        pdf_path = self.epub_dir / f"{book_id}.pdf"
+        pdf_path.write_bytes(file_bytes)
+
+        title = filename.replace(".pdf", "").replace(".PDF", "")
+
+        try:
+            doc = fitz.open(stream=file_bytes, filetype="pdf")
+        except Exception as e:
+            pdf_path.unlink(missing_ok=True)
+            raise ValueError(f"无法解析 PDF 文件: {e}")
+
+        # extract text from all pages
+        pages_text = []
+        for page_num in range(len(doc)):
+            page = doc[page_num]
+            text = page.get_text("text").strip()
+            if text:
+                pages_text.append(text)
+        doc.close()
+
+        if not pages_text:
+            pdf_path.unlink(missing_ok=True)
+            raise ValueError("PDF 文件内容为空或无法提取文本")
+
+        # group pages into chapters (10 pages per chapter)
+        pages_per_chapter = 10
+        chapters = []
+        for i in range(0, len(pages_text), pages_per_chapter):
+            chunk_pages = pages_text[i : i + pages_per_chapter]
+            chunk_text = "\n\n".join(chunk_pages)
+            page_start = i + 1
+            page_end = min(i + pages_per_chapter, len(pages_text))
+
+            ch_title = f"第{len(chapters) + 1}节 (p.{page_start}-{page_end})"
+            html = f"<p>{'</p><p>'.join(chunk_text.split(chr(10)))}</p>"
+
+            chapters.append(
+                {
+                    "index": len(chapters),
+                    "title": ch_title,
+                    "html": html,
+                    "text_preview": chunk_text[:200],
+                }
+            )
+
+        # cache chapters
+        cache_file = self.cache_dir / f"{book_id}.json"
+        cache_file.write_text(
+            json.dumps(chapters, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+        # save to library index
+        book_info = {
+            "title": title,
+            "author": "Unknown",
             "filename": filename,
             "chapter_count": len(chapters),
             "added_at": time.time(),

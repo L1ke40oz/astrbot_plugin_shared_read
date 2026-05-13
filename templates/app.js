@@ -449,7 +449,7 @@ function goToPage(page) {
 // ==================== Upload ====================
 
 async function uploadBook(file) {
-  if (!file || !(file.name.endsWith(".epub") || file.name.endsWith(".txt"))) return;
+  if (!file || !(file.name.endsWith(".epub") || file.name.endsWith(".txt") || file.name.endsWith(".pdf"))) return;
   var formData = new FormData();
   formData.append("file", file);
   try {

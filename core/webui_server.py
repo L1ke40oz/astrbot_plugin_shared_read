@@ -244,10 +244,12 @@ class WebUIServer:
         @app.post("/api/books/upload")
         async def api_upload_book(file: UploadFile = File(...)):
             if not file.filename or not (
-                file.filename.endswith(".epub") or file.filename.endswith(".txt")
+                file.filename.lower().endswith(".epub")
+                or file.filename.lower().endswith(".txt")
+                or file.filename.lower().endswith(".pdf")
             ):
                 raise HTTPException(
-                    400, detail="only .epub and .txt files are supported"
+                    400, detail="only .epub, .txt, and .pdf files are supported"
                 )
 
             file_bytes = await file.read()
@@ -275,6 +277,21 @@ class WebUIServer:
         @app.delete("/api/books/{book_id}")
         async def api_delete_book(book_id: str):
             self.book_manager.delete_book(book_id)
+            # also delete associated session and bot memories
+            self.session_manager.delete_book_session(book_id)
+            if self.bot_reader:
+                # remove bot chapter memories for this book
+                if book_id in self.bot_reader.memories:
+                    del self.bot_reader.memories[book_id]
+                    self.bot_reader._save_memories()
+                # remove bot reading progress for this book
+                if book_id in self.bot_reader.progress:
+                    del self.bot_reader.progress[book_id]
+                    self.bot_reader._save_progress()
+                # remove user reading progress for this book
+                if book_id in self.bot_reader.user_progress:
+                    del self.bot_reader.user_progress[book_id]
+                    self.bot_reader._save_user_progress()
             return {"success": True}
 
         # --- Interaction APIs ---
