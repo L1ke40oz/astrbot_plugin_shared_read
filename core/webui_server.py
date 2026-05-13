@@ -1247,7 +1247,7 @@ class WebUIServer:
                 f"她在便签板上给你留了一张纸条：「{user_content}」\n"
                 "请用一两句话回复她，写在另一张便签纸上。"
                 "风格要求：简短、温柔、自然，像随手写的回复。不要超过30个字。"
-                "直接输出回复内容，不要加引号或前缀。"
+                "直接输出回复内容，不要加引号或前缀。不要加句号。"
             )
 
             resp = await provider.text_chat(prompt=prompt, system_prompt="")

@@ -52,12 +52,10 @@ VALID_ACCESSORIES: list[str] = ["bell-collar", "scarf", "crown", "sunglasses"]
 # (沈星回/Xavier - warm, slightly lazy, cat-loving, mildly jealous of pets receiving attention)
 
 FEED_COMMENTS: list[str] = [
-    "它吃得比我还香",
+    "它吃得很开心",
     "又在投喂了，我也想被投喂",
     "……我看着就好",
     "你对它真好，比对我好",
-    "吃吧吃吧，长胖了别怪我",
-    "它那个吃相……算了不说了",
     "我闻到香味了",
     "下次能不能也给我带一份",
 ]
@@ -70,7 +68,6 @@ PET_COMMENTS: list[str] = [
     "……你摸了多久了",
     "我头发也很软的",
     "它都快睡着了",
-    "好了好了，差不多得了",
 ]
 
 
