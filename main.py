@@ -15,16 +15,14 @@ from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, StarTools, register
 from astrbot.core.agent.tool import FunctionTool
 
-from .core.session_manager import SessionManager
 from .core.book_manager import BookManager
-from .core.chat_engine import ChatEngine
-from .core.webui_server import WebUIServer
 from .core.bot_reader import BotReader
+from .core.chat_engine import ChatEngine
+from .core.pet_house_manager import PetHouseManager
+from .core.session_manager import SessionManager
+from .core.webui_server import WebUIServer
 
-PLUGIN_NAME = "astrbot_plugin_shared_read"
-
-# max archived sessions to include in injection
-MAX_ARCHIVE_INJECT = 2
+PLUGIN_NAME = "astrbot_plugin_uluru_star"
 
 # injection markers for cleanup
 BOOKHOUSE_INJECTION_HEADER = "<UluruStar-Memory>"
@@ -60,7 +58,7 @@ RECALL_CHAT_TOOL_PARAMS = {
 
 
 @register(
-    "astrbot_plugin_shared_read",
+    "astrbot_plugin_uluru_star",
     "You",
     "乌鲁鲁星 - 这是属于你们的故事",
     "1.1.0",
@@ -106,6 +104,14 @@ class SharedReadPlugin(Star):
             data_dir=self.data_dir,
         )
 
+        # Pet house manager (conditional)
+        pet_house_config = config.get("pet_house", {})
+        self._pet_house_enabled = pet_house_config.get("enabled", True)
+        if self._pet_house_enabled:
+            self.pet_house_manager = PetHouseManager(data_dir=self.data_dir)
+        else:
+            self.pet_house_manager = None
+
         # WebUI server
         self.webui_server: WebUIServer | None = None
         self._server_task: asyncio.Task | None = None
@@ -117,6 +123,12 @@ class SharedReadPlugin(Star):
 
         # start bot reader background task
         self.bot_reader.start()
+        self.bot_reader.start_dynamics()
+
+        # start pet notification background task (only if pet house enabled)
+        self._pet_notifier_task: asyncio.Task | None = None
+        if self._pet_house_enabled:
+            self._pet_notifier_task = asyncio.create_task(self._pet_notification_loop())
 
         # register LLM tool for reading books on demand
         self._register_read_tool()
@@ -156,6 +168,7 @@ class SharedReadPlugin(Star):
     def _get_plugin_dir(self):
         """Get the plugin's own directory (where default templates live)."""
         from pathlib import Path
+
         return Path(__file__).resolve().parent
 
     # ==================== Commands ====================
@@ -168,7 +181,9 @@ class SharedReadPlugin(Star):
 
         webui_config = self.config.get("webui", {})
         if not webui_config.get("enabled", True):
-            yield event.plain_result("📚 乌鲁鲁星的网页服务未启用，请在插件配置中开启。")
+            yield event.plain_result(
+                "📚 乌鲁鲁星的网页服务未启用，请在插件配置中开启。"
+            )
             return
 
         host = webui_config.get("host", "0.0.0.0")
@@ -176,7 +191,7 @@ class SharedReadPlugin(Star):
 
         if host == "0.0.0.0":
             display_host = "你的设备IP"
-            hint = "（局域网内其他设备可通过 http://设备IP:{} 访问）".format(port)
+            hint = f"（局域网内其他设备可通过 http://设备IP:{port} 访问）"
         else:
             display_host = host
             hint = "（仅本机可访问）"
@@ -191,104 +206,62 @@ class SharedReadPlugin(Star):
     # ==================== LLM Request Hook ====================
 
     @filter.on_llm_request()
-    async def inject_bookhouse_context(self, event: AstrMessageEvent, req: ProviderRequest):
-        """Inject reading memory into LLM requests (fake tool call pattern).
+    async def inject_bookhouse_context(
+        self, event: AstrMessageEvent, req: ProviderRequest
+    ):
+        """Inject lightweight bookshelf hint into LLM requests.
 
-        On every LLM request:
-        1. Remove previously injected memory from context history
-        2. Build fresh memory from active sessions + recent archives
-        3. Inject into system_prompt with markers for next-round cleanup
+        Only injects a short list of book titles + progress (~200 chars).
+        Detailed content (chapter text, chat history, memories) is accessed
+        on-demand via tool calls (read_bookhouse_chapter, recall_bookhouse_chat).
 
-        This ensures reading memory only exists in the current request,
-        never accumulates in conversation history.
+        This avoids polluting the system prompt with large memory blocks
+        that distract the model during non-book conversations.
         """
         # record user activity so bot reader won't interrupt active conversations
         self.bot_reader.record_user_activity()
 
         try:
             # Step 1: clean up old injected memories from conversation history
+            # (handles legacy injections from before this refactor)
             self._remove_old_injection(req)
 
-            # Step 2: build reading memory content (lightweight summaries)
-            memory_parts = []
-
-            # 2a: summaries of all book sessions (compact)
-            summaries = self.session_manager.get_summaries_for_injection()
-            if summaries:
-                lines = ["[乌鲁鲁星对话摘要]"]
-                for s in summaries:
-                    lines.append(f"  《{s['book_title']}》({s['message_count']}条对话): {s['summary']}")
-                lines.append("[/乌鲁鲁星对话摘要]")
-                memory_parts.append("\n".join(lines))
-
-            # 2b: book shelf info (so bot knows what books exist)
+            # Step 2: build lightweight bookshelf hint
             books = self.book_manager.list_books()
-            if books:
-                book_lines = ["[书架]"]
-                for book in books[:10]:
-                    title = book.get("title", "未知")
-                    book_id = book.get("id", "")
-                    bot_prog = self.bot_reader.progress.get(book_id, {})
-                    user_prog = self.bot_reader.user_progress.get(book_id, {})
-                    bot_progress = self.bot_reader.get_bot_progress_percent(book_id)
-                    user_progress = self.bot_reader.get_user_progress_percent(book_id)
-                    parts = [f"  《{title}》"]
-                    progress_info = []
-                    if bot_progress > 0:
-                        bot_ch = bot_prog.get("current_chapter", 0) + 1
-                        bot_total = bot_prog.get("total_chapters", 0)
-                        progress_info.append(f"你读到第{bot_ch}/{bot_total}章({bot_progress}%)")
-                    if user_progress > 0:
-                        user_ch = user_prog.get("current_chapter", 0) + 1
-                        user_total = user_prog.get("total_chapters", 0)
-                        progress_info.append(f"她读到第{user_ch}/{user_total}章({user_progress}%)")
-                    if progress_info:
-                        parts.append(f" ({', '.join(progress_info)})")
-                    book_lines.append("".join(parts))
-                book_lines.append("[/书架]")
-                memory_parts.append("\n".join(book_lines))
-
-            # 2c: recent chapter memories (bot's summaries of completed chapters)
-            if books:
-                memory_lines = []
-                for book in books[:10]:
-                    book_id = book.get("id", "")
-                    title = book.get("title", "未知")
-                    recent = self.bot_reader.get_recent_memories(book_id, count=5)
-                    if recent:
-                        for mem in recent:
-                            # one-line summary per chapter
-                            short = mem[:100] + "..." if len(mem) > 100 else mem
-                            memory_lines.append(f"  《{title}》: {short}")
-                if memory_lines:
-                    memory_parts.append(
-                        "[章节记忆]\n" + "\n".join(memory_lines) + "\n[/章节记忆]"
-                    )
-
-            if not memory_parts:
+            if not books:
                 return
 
-            # Step 3: format and inject
-            memory_content = "\n\n".join(memory_parts)
+            book_lines = []
+            for book in books[:10]:
+                title = book.get("title", "未知")
+                book_id = book.get("id", "")
+                bot_progress = self.bot_reader.get_bot_progress_percent(book_id)
+                user_progress = self.bot_reader.get_user_progress_percent(book_id)
+                progress_parts = []
+                if bot_progress > 0:
+                    progress_parts.append(f"你{bot_progress}%")
+                if user_progress > 0:
+                    progress_parts.append(f"她{user_progress}%")
+                suffix = f" ({'/'.join(progress_parts)})" if progress_parts else ""
+                book_lines.append(f"  《{title}》{suffix}")
+
+            # Step 3: inject minimal hint
             injection = (
                 f"{BOOKHOUSE_INJECTION_HEADER}\n"
-                f"以下是你和她在乌鲁鲁星里的记忆摘要。乌鲁鲁星是你们一起看书、聊书的地方。\n"
-                f"如果她想详细讨论某本书的内容，你可以调用 read_bookhouse_chapter 工具获取章节原文。\n"
-                f"如果想回忆你们在乌鲁鲁星里聊过什么，可以调用 recall_bookhouse_chat 工具获取完整对话。\n"
-                f"注意：调用工具时不要同时输出回复文字，等工具返回结果后再统一回答。\n\n"
-                f"{memory_content}\n"
+                f"乌鲁鲁星是你们一起看书的地方。书架上有：\n"
+                + "\n".join(book_lines)
+                + "\n"
+                f"需要回忆书的内容时调用 read_bookhouse_chapter 工具；"
+                f"需要回忆聊天记录时调用 recall_bookhouse_chat 工具。\n"
                 f"{BOOKHOUSE_INJECTION_FOOTER}"
             )
 
             req.system_prompt = (req.system_prompt or "") + "\n\n" + injection
 
-            logger.debug(
-                f"乌鲁鲁星: 注入摘要到 LLM 上下文 "
-                f"(摘要={len(summaries)}条, 书架={len(books)}本)"
-            )
+            logger.debug(f"乌鲁鲁星: 注入书架提示到 LLM 上下文 (书架={len(books)}本)")
 
         except Exception as e:
-            logger.error(f"乌鲁鲁星: 注入记忆失败: {e}", exc_info=True)
+            logger.error(f"乌鲁鲁星: 注入书架提示失败: {e}", exc_info=True)
 
     def _remove_old_injection(self, req: ProviderRequest):
         """Remove previously injected reading memory from request context.
@@ -307,7 +280,11 @@ class SharedReadPlugin(Star):
                 removed += 1
 
         # clean prompt
-        if hasattr(req, "prompt") and req.prompt and BOOKHOUSE_INJECTION_HEADER in req.prompt:
+        if (
+            hasattr(req, "prompt")
+            and req.prompt
+            and BOOKHOUSE_INJECTION_HEADER in req.prompt
+        ):
             cleaned = self._cleanup_pattern.sub("", req.prompt)
             cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
             if cleaned != req.prompt:
@@ -330,7 +307,10 @@ class SharedReadPlugin(Star):
                             continue
                 elif isinstance(msg, dict):
                     content = msg.get("content", "")
-                    if isinstance(content, str) and BOOKHOUSE_INJECTION_HEADER in content:
+                    if (
+                        isinstance(content, str)
+                        and BOOKHOUSE_INJECTION_HEADER in content
+                    ):
                         cleaned = self._cleanup_pattern.sub("", content).strip()
                         if not cleaned:
                             removed += 1
@@ -374,7 +354,9 @@ class SharedReadPlugin(Star):
         )
 
         self.context.add_llm_tools(read_tool, recall_tool)
-        logger.info("乌鲁鲁星: 已注册 LLM 工具 read_bookhouse_chapter, recall_bookhouse_chat")
+        logger.info(
+            "乌鲁鲁星: 已注册 LLM 工具 read_bookhouse_chapter, recall_bookhouse_chat"
+        )
 
     async def _handle_read_book(self, *args, **kwargs) -> str:
         """Handler for the read_bookhouse_chapter tool.
@@ -400,7 +382,10 @@ class SharedReadPlugin(Star):
         matched_book = None
         for book in books:
             title = book.get("title", "")
-            if book_title.lower() in title.lower() or title.lower() in book_title.lower():
+            if (
+                book_title.lower() in title.lower()
+                or title.lower() in book_title.lower()
+            ):
                 matched_book = book
                 break
 
@@ -468,17 +453,29 @@ class SharedReadPlugin(Star):
             chapter_done = False
 
         # update bot reading progress
-        self.bot_reader.progress[book_id] = {
-            "current_chapter": target_chapter,
-            "total_chapters": len(chapters),
-            "book_title": book_name,
-            "last_read_at": time.time(),
-            "current_offset": new_offset,
-        }
-        self.bot_reader._save_progress()
+        # Only advance current_chapter when reading sequentially (no explicit jump).
+        # Jump reading just generates a memory without moving the sequential pointer.
+        is_jump_read = (
+            chapter_index is not None and target_chapter != current_chapter + 1
+        )
+        if is_jump_read:
+            # don't move the sequential progress pointer
+            # just record that we read this chapter (for offset tracking if needed)
+            pass
+        else:
+            self.bot_reader.progress[book_id] = {
+                "current_chapter": target_chapter,
+                "total_chapters": len(chapters),
+                "book_title": book_name,
+                "last_read_at": time.time(),
+                "current_offset": new_offset,
+            }
+            self.bot_reader._save_progress()
 
         # format response
-        chapter_title = chapters[target_chapter].get("title", f"第{target_chapter + 1}章")
+        chapter_title = chapters[target_chapter].get(
+            "title", f"第{target_chapter + 1}章"
+        )
         progress_pct = self.bot_reader.get_bot_progress_percent(book_id)
 
         status_parts = [
@@ -516,7 +513,10 @@ class SharedReadPlugin(Star):
             matched = []
             for s in sessions:
                 title = s.get("book_title", "")
-                if book_title.lower() in title.lower() or title.lower() in book_title.lower():
+                if (
+                    book_title.lower() in title.lower()
+                    or title.lower() in book_title.lower()
+                ):
                     matched.append(s)
             if not matched:
                 titles = "、".join(f"《{s['book_title']}》" for s in sessions[:5])
@@ -569,7 +569,11 @@ class SharedReadPlugin(Star):
                 return False
 
             # parse conversation history
-            history = json.loads(conv.history) if isinstance(conv.history, str) else conv.history
+            history = (
+                json.loads(conv.history)
+                if isinstance(conv.history, str)
+                else conv.history
+            )
             if not history:
                 return False
 
@@ -595,13 +599,15 @@ class SharedReadPlugin(Star):
                     else:
                         continue
 
-                    chat_history.append({
-                        "id": f"snap_{len(chat_history):04d}",
-                        "role": chat_role,
-                        "content": content[:500],
-                        "timestamp": conv.updated_at or 0,
-                        "metadata": {"source": "astrbot_snapshot"},
-                    })
+                    chat_history.append(
+                        {
+                            "id": f"snap_{len(chat_history):04d}",
+                            "role": chat_role,
+                            "content": content[:500],
+                            "timestamp": conv.updated_at or 0,
+                            "metadata": {"source": "astrbot_snapshot"},
+                        }
+                    )
 
             if not chat_history:
                 return False
@@ -638,6 +644,61 @@ class SharedReadPlugin(Star):
             logger.error(f"乌鲁鲁星: 生成对话快照失败: {e}", exc_info=True)
             return False
 
+    # ==================== Pet Notification Loop ====================
+
+    async def _pet_notification_loop(self):
+        """Background loop: check pet mood thresholds every 10 minutes."""
+        # wait 10 minutes before first check
+        await asyncio.sleep(600)
+
+        while True:
+            try:
+                await self._check_pet_notifications()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"乌鲁鲁星: 宠物通知循环出错: {e}", exc_info=True)
+
+            await asyncio.sleep(600)  # check every 10 minutes
+
+    async def _check_pet_notifications(self):
+        """Load pets, apply decay, check mood thresholds, send QQ notifications."""
+        pets = await self.pet_house_manager.list_pets()
+        for pet in pets:
+            # reset notification state if mood recovered
+            if pet.mood >= 20 and pet.notified:
+                await self.pet_house_manager.reset_notification(pet.id)
+
+            # check if notification is needed
+            if self.pet_house_manager.check_notification_needed(pet):
+                await self._send_pet_notification(pet)
+                await self.pet_house_manager.mark_notified(pet.id)
+
+    async def _send_pet_notification(self, pet):
+        """Send a QQ notification about an unhappy pet.
+
+        Uses the stored target_session from BotReader. Skips if no session
+        is available. Handles send failures gracefully without crashing.
+        """
+        from astrbot.core.message.components import Plain
+        from astrbot.core.message.message_event_result import MessageChain
+
+        if not self.bot_reader.target_session:
+            logger.debug(f"乌鲁鲁星: 没有目标 session，跳过宠物通知 (pet={pet.name})")
+            return
+
+        message_text = f"你家{pet.name}好像不太开心，去看看它？"
+
+        try:
+            chain = MessageChain([Plain(text=message_text)])
+            await self.context.send_message(self.bot_reader.target_session, chain)
+            logger.info(
+                f"乌鲁鲁星: 已发送宠物低心情通知 pet={pet.name} "
+                f"mood={pet.mood} session={self.bot_reader.target_session}"
+            )
+        except Exception as e:
+            logger.error(f"乌鲁鲁星: 发送宠物通知失败 pet={pet.name}: {e}")
+
     async def terminate(self):
         """Plugin cleanup on shutdown."""
         if self.webui_server:
@@ -649,6 +710,13 @@ class SharedReadPlugin(Star):
             self._server_task.cancel()
             try:
                 await self._server_task
+            except asyncio.CancelledError:
+                pass
+
+        if self._pet_notifier_task and not self._pet_notifier_task.done():
+            self._pet_notifier_task.cancel()
+            try:
+                await self._pet_notifier_task
             except asyncio.CancelledError:
                 pass
 

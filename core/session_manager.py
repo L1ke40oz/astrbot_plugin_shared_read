@@ -43,6 +43,7 @@ class SessionManager:
         if archives_dir.exists():
             try:
                 import shutil
+
                 shutil.rmtree(archives_dir)
                 logger.info("乌鲁鲁星: 已清理旧版 archives 文件夹")
             except Exception as e:
@@ -58,7 +59,9 @@ class SessionManager:
 
     # ==================== Book Session CRUD ====================
 
-    def get_or_create_book_session(self, book_id: str, book_title: str = "") -> dict[str, Any]:
+    def get_or_create_book_session(
+        self, book_id: str, book_title: str = ""
+    ) -> dict[str, Any]:
         """Get existing session for a book, or create a new one.
 
         This is the main entry point when user selects a book.
@@ -138,7 +141,9 @@ class SessionManager:
             return []
         return session.get("chat_history", [])
 
-    def add_chat_message(self, book_id: str, role: str, content: str, metadata: dict | None = None):
+    def add_chat_message(
+        self, book_id: str, role: str, content: str, metadata: dict | None = None
+    ):
         """Add a message to a book's chat history.
 
         Args:
@@ -204,11 +209,13 @@ class SessionManager:
                     parts.append(f"{role}: {text}")
                 summary = "; ".join(parts)
 
-            results.append({
-                "book_title": book_title,
-                "summary": summary,
-                "message_count": len(chat_history),
-            })
+            results.append(
+                {
+                    "book_title": book_title,
+                    "summary": summary,
+                    "message_count": len(chat_history),
+                }
+            )
 
         return results
 
@@ -237,7 +244,9 @@ class SessionManager:
                 results.append(data)
         return results
 
-    def get_recent_messages_for_injection(self, max_messages: int = 10) -> list[dict[str, Any]]:
+    def get_recent_messages_for_injection(
+        self, max_messages: int = 10
+    ) -> list[dict[str, Any]]:
         """Get recent messages from the active book session for LLM injection.
 
         Returns the most recent messages from the currently active book session.
@@ -265,13 +274,15 @@ class SessionManager:
             except (json.JSONDecodeError, OSError):
                 continue
 
-            results.append({
-                "book_id": data.get("book_id", session_file.stem),
-                "book_title": data.get("book_title", "未知"),
-                "message_count": len(data.get("chat_history", [])),
-                "last_active": data.get("last_active", 0),
-                "created_at": data.get("created_at", 0),
-            })
+            results.append(
+                {
+                    "book_id": data.get("book_id", session_file.stem),
+                    "book_title": data.get("book_title", "未知"),
+                    "message_count": len(data.get("chat_history", [])),
+                    "last_active": data.get("last_active", 0),
+                    "created_at": data.get("created_at", 0),
+                }
+            )
 
         results.sort(key=lambda x: x.get("last_active", 0), reverse=True)
         return results
@@ -336,13 +347,15 @@ class SessionManager:
                     continue
 
             # format as archive-compatible structure
-            results.append({
-                "session_id": data.get("book_id", session_file.stem),
-                "book_title": data.get("book_title", ""),
-                "started_at": data.get("created_at"),
-                "ended_at": data.get("last_active"),
-                "chat_history": chat_history,
-            })
+            results.append(
+                {
+                    "session_id": data.get("book_id", session_file.stem),
+                    "book_title": data.get("book_title", ""),
+                    "started_at": data.get("created_at"),
+                    "ended_at": data.get("last_active"),
+                    "chat_history": chat_history,
+                }
+            )
 
         results.sort(key=lambda x: x.get("ended_at", 0), reverse=True)
         return results

@@ -47,13 +47,15 @@ class BookManager:
         """List all books with basic info."""
         books = []
         for book_id, info in self.library.get("books", {}).items():
-            books.append({
-                "id": book_id,
-                "title": info.get("title", ""),
-                "author": info.get("author", ""),
-                "chapter_count": info.get("chapter_count", 0),
-                "added_at": info.get("added_at", 0),
-            })
+            books.append(
+                {
+                    "id": book_id,
+                    "title": info.get("title", ""),
+                    "author": info.get("author", ""),
+                    "chapter_count": info.get("chapter_count", 0),
+                    "added_at": info.get("added_at", 0),
+                }
+            )
         return sorted(books, key=lambda b: b["added_at"], reverse=True)
 
     def add_book(self, filename: str, file_bytes: bytes) -> dict[str, Any]:
@@ -65,11 +67,16 @@ class BookManager:
         elif filename.lower().endswith(".epub"):
             return self._add_epub_book(book_id, filename, file_bytes)
         else:
-            raise ValueError("Unsupported file format. Only .epub and .txt are supported.")
+            raise ValueError(
+                "Unsupported file format. Only .epub and .txt are supported."
+            )
 
-    def _add_txt_book(self, book_id: str, filename: str, file_bytes: bytes) -> dict[str, Any]:
+    def _add_txt_book(
+        self, book_id: str, filename: str, file_bytes: bytes
+    ) -> dict[str, Any]:
         """Parse and add a txt book."""
         import re
+
         import chardet
 
         # detect encoding
@@ -88,8 +95,8 @@ class BookManager:
 
         # split into chapters by common patterns
         chapter_pattern = re.compile(
-            r'^(第[零一二三四五六七八九十百千万\d]+[章节回卷]|Chapter\s+\d+|CHAPTER\s+\d+)',
-            re.MULTILINE
+            r"^(第[零一二三四五六七八九十百千万\d]+[章节回卷]|Chapter\s+\d+|CHAPTER\s+\d+)",
+            re.MULTILINE,
         )
         splits = list(chapter_pattern.finditer(text))
 
@@ -97,14 +104,16 @@ class BookManager:
         if splits:
             # add prologue if there's content before first chapter marker
             if splits[0].start() > 100:
-                prologue_text = text[:splits[0].start()].strip()
+                prologue_text = text[: splits[0].start()].strip()
                 if prologue_text:
-                    chapters.append({
-                        "index": 0,
-                        "title": "序",
-                        "html": f"<p>{'</p><p>'.join(prologue_text.split(chr(10)))}</p>",
-                        "text_preview": prologue_text[:200],
-                    })
+                    chapters.append(
+                        {
+                            "index": 0,
+                            "title": "序",
+                            "html": f"<p>{'</p><p>'.join(prologue_text.split(chr(10)))}</p>",
+                            "text_preview": prologue_text[:200],
+                        }
+                    )
 
             for i, match in enumerate(splits):
                 start = match.start()
@@ -117,26 +126,30 @@ class BookManager:
                 ch_body = lines[1].strip() if len(lines) > 1 else ""
 
                 html = f"<p>{'</p><p>'.join(ch_body.split(chr(10)))}</p>"
-                chapters.append({
-                    "index": len(chapters),
-                    "title": ch_title,
-                    "html": html,
-                    "text_preview": ch_body[:200],
-                })
+                chapters.append(
+                    {
+                        "index": len(chapters),
+                        "title": ch_title,
+                        "html": html,
+                        "text_preview": ch_body[:200],
+                    }
+                )
         else:
             # no chapter markers found, split by fixed size (~3000 chars)
             chunk_size = 3000
             for i in range(0, len(text), chunk_size):
-                chunk = text[i:i + chunk_size].strip()
+                chunk = text[i : i + chunk_size].strip()
                 if not chunk:
                     continue
                 html = f"<p>{'</p><p>'.join(chunk.split(chr(10)))}</p>"
-                chapters.append({
-                    "index": len(chapters),
-                    "title": f"第{len(chapters) + 1}节",
-                    "html": html,
-                    "text_preview": chunk[:200],
-                })
+                chapters.append(
+                    {
+                        "index": len(chapters),
+                        "title": f"第{len(chapters) + 1}节",
+                        "html": html,
+                        "text_preview": chunk[:200],
+                    }
+                )
 
         if not chapters:
             txt_path.unlink(missing_ok=True)
@@ -162,12 +175,14 @@ class BookManager:
 
         return {"id": book_id, **book_info}
 
-    def _add_epub_book(self, book_id: str, filename: str, file_bytes: bytes) -> dict[str, Any]:
+    def _add_epub_book(
+        self, book_id: str, filename: str, file_bytes: bytes
+    ) -> dict[str, Any]:
         """Parse and add an epub book."""
+
         import ebooklib
-        from ebooklib import epub
         from bs4 import BeautifulSoup
-        import io
+        from ebooklib import epub
 
         # save epub file
         epub_path = self.epub_dir / f"{book_id}.epub"
@@ -197,14 +212,20 @@ class BookManager:
 
             # try to get chapter title
             heading = soup.find(["h1", "h2", "h3"])
-            ch_title = heading.get_text(strip=True) if heading else f"Chapter {len(chapters) + 1}"
+            ch_title = (
+                heading.get_text(strip=True)
+                if heading
+                else f"Chapter {len(chapters) + 1}"
+            )
 
-            chapters.append({
-                "index": len(chapters),
-                "title": ch_title,
-                "html": str(soup),
-                "text_preview": text[:200],
-            })
+            chapters.append(
+                {
+                    "index": len(chapters),
+                    "title": ch_title,
+                    "html": str(soup),
+                    "text_preview": text[:200],
+                }
+            )
 
         # cache chapters
         cache_file = self.cache_dir / f"{book_id}.json"
@@ -235,7 +256,11 @@ class BookManager:
         chapters = json.loads(cache_file.read_text(encoding="utf-8"))
         # return without full html for listing
         return [
-            {"index": ch["index"], "title": ch["title"], "text_preview": ch.get("text_preview", "")}
+            {
+                "index": ch["index"],
+                "title": ch["title"],
+                "text_preview": ch.get("text_preview", ""),
+            }
             for ch in chapters
         ]
 
@@ -262,6 +287,7 @@ class BookManager:
             return None
 
         from bs4 import BeautifulSoup
+
         soup = BeautifulSoup(chapters[chapter_index].get("html", ""), "html.parser")
         return soup.get_text(strip=True)
 
@@ -293,13 +319,35 @@ class BookManager:
             "context": context,
             "created_at": time.time(),
         }
-        self.library.setdefault("highlights", {}).setdefault(book_id, []).append(highlight)
+        self.library.setdefault("highlights", {}).setdefault(book_id, []).append(
+            highlight
+        )
         self._save_library()
         return highlight
 
     def get_highlights(self, book_id: str) -> list[dict[str, Any]]:
         """Get all highlights for a book."""
         return self.library.get("highlights", {}).get(book_id, [])
+
+    def remove_highlight(
+        self, book_id: str, text: str, chapter_index: int | None = None
+    ) -> bool:
+        """Remove a highlight by text match (and optionally chapter_index)."""
+        highlights = self.library.get("highlights", {}).get(book_id, [])
+        if not highlights:
+            return False
+
+        for i, h in enumerate(highlights):
+            if h.get("text") == text:
+                if (
+                    chapter_index is not None
+                    and h.get("chapter_index") != chapter_index
+                ):
+                    continue
+                highlights.pop(i)
+                self._save_library()
+                return True
+        return False
 
     # ==================== Reviews ====================
 

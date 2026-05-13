@@ -14,8 +14,8 @@ from typing import Any
 
 from astrbot.api import logger
 from astrbot.api.star import Context
-from astrbot.core.message.message_event_result import MessageChain
 from astrbot.core.message.components import Plain
+from astrbot.core.message.message_event_result import MessageChain
 
 from .book_manager import BookManager
 
@@ -79,22 +79,61 @@ class BotReader:
             encoding="utf-8",
         )
 
-    def report_user_progress(self, book_id: str, chapter_index: int, total_chapters: int, book_title: str = ""):
-        """Record user's reading progress (called when user opens a chapter)."""
+    def report_user_progress(
+        self,
+        book_id: str,
+        chapter_index: int,
+        total_chapters: int,
+        book_title: str = "",
+    ):
+        """Record user's reading progress (high-water-mark mode).
+
+        Only advances if user opened a chapter beyond the current record.
+        Progress never goes backwards.
+        """
         current = self.user_progress.get(book_id, {})
         current_chapter = current.get("current_chapter", -1)
         # only update if user advanced (or first time)
         if chapter_index >= current_chapter:
-            self.user_progress[book_id] = {
-                "current_chapter": chapter_index,
-                "total_chapters": total_chapters,
-                "book_title": book_title,
-                "last_read_at": time.time(),
-            }
+            current["current_chapter"] = chapter_index
+            current["total_chapters"] = total_chapters
+            if book_title:
+                current["book_title"] = book_title
+            current["last_read_at"] = time.time()
+            self.user_progress[book_id] = current
             self._save_user_progress()
 
+    def checkin_chapter(
+        self,
+        book_id: str,
+        chapter_index: int,
+        total_chapters: int,
+        book_title: str = "",
+    ):
+        """Record a chapter checkin (打卡). Purely for triggering summary + marking.
+
+        Does NOT affect progress calculation. Progress is based on high-water-mark.
+        Duplicate checkins for the same chapter are ignored.
+        """
+        current = self.user_progress.get(book_id, {})
+        checked_set = set(current.get("checked_chapters_list", []))
+
+        # ignore duplicate checkin for same chapter
+        if chapter_index in checked_set:
+            return
+
+        # add this chapter to checked set
+        checked_set.add(chapter_index)
+        current["checked_chapters_list"] = sorted(checked_set)
+        current["total_chapters"] = total_chapters
+        if book_title:
+            current["book_title"] = book_title
+        current["last_checkin_at"] = time.time()
+        self.user_progress[book_id] = current
+        self._save_user_progress()
+
     def get_user_progress_percent(self, book_id: str) -> int:
-        """Get user's reading progress as a percentage."""
+        """Get user's reading progress as a percentage (high-water-mark)."""
         prog = self.user_progress.get(book_id)
         if not prog:
             return 0
@@ -102,7 +141,6 @@ class BotReader:
         if total <= 0:
             return 0
         current = prog.get("current_chapter", 0)
-        # current_chapter is the chapter user is reading (0-indexed)
         # progress = (current + 1) / total since user has at least opened this chapter
         return min(99, round(((current + 1) / total) * 100))
 
@@ -155,7 +193,9 @@ class BotReader:
         """Save the target session ID (called when user uses /乌鲁鲁星 command)."""
         self.target_session = session_id
         self.target_session_file.write_text(
-            json.dumps({"session_id": session_id, "saved_at": time.time()}, ensure_ascii=False),
+            json.dumps(
+                {"session_id": session_id, "saved_at": time.time()}, ensure_ascii=False
+            ),
             encoding="utf-8",
         )
 
@@ -195,12 +235,23 @@ class BotReader:
 
         Combines chapter text, highlights, and chat history to produce
         a short summary from the bot's perspective.
+        Skips if a memory already exists for this chapter (no duplicate summaries).
         """
         try:
+            # skip if memory already exists for this chapter
+            existing = self.get_chapter_memory(book_id, chapter_index)
+            if existing:
+                logger.debug(
+                    f"乌鲁鲁星: 章节记忆已存在，跳过 book={book_id} ch={chapter_index}"
+                )
+                return
+
             # get chapter text
             chapter_text = self.book_manager.get_chapter_text(book_id, chapter_index)
             if not chapter_text:
-                logger.warning(f"乌鲁鲁星: 无法获取章节文本 book={book_id} ch={chapter_index}")
+                logger.warning(
+                    f"乌鲁鲁星: 无法获取章节文本 book={book_id} ch={chapter_index}"
+                )
                 return
 
             # get book title and chapter title
@@ -211,13 +262,14 @@ class BotReader:
             chapters = self.book_manager.get_chapters(book_id)
             chapter_title = ""
             if chapters and 0 <= chapter_index < len(chapters):
-                chapter_title = chapters[chapter_index].get("title", f"第{chapter_index + 1}章")
+                chapter_title = chapters[chapter_index].get(
+                    "title", f"第{chapter_index + 1}章"
+                )
 
             # get highlights for this chapter
             all_highlights = self.book_manager.get_highlights(book_id)
             chapter_highlights = [
-                h for h in all_highlights
-                if h.get("chapter_index") == chapter_index
+                h for h in all_highlights if h.get("chapter_index") == chapter_index
             ]
             highlights_text = ""
             if chapter_highlights:
@@ -349,7 +401,9 @@ class BotReader:
 
         # verify memory was actually created before considering it progress
         if not self.get_chapter_memory(book_id, next_chapter):
-            logger.warning(f"乌鲁鲁星: 自动阅读生成记忆失败 book={book_id} ch={next_chapter}")
+            logger.warning(
+                f"乌鲁鲁星: 自动阅读生成记忆失败 book={book_id} ch={next_chapter}"
+            )
             return
 
         # update progress dict for compatibility
@@ -362,7 +416,9 @@ class BotReader:
         }
         self._save_progress()
 
-        logger.info(f"乌鲁鲁星: 自动阅读完成 《{book.get('title', '')}》第{next_chapter + 1}章")
+        logger.info(
+            f"乌鲁鲁星: 自动阅读完成 《{book.get('title', '')}》第{next_chapter + 1}章"
+        )
 
         # maybe send a proactive message based on configured probability
         bot_config = self.config.get("bot_reading", {})
@@ -451,3 +507,153 @@ class BotReader:
 
         except Exception as e:
             logger.debug(f"乌鲁鲁星: 保存对话历史失败: {e}")
+
+    # ==================== Bot Dynamics (足迹动态) ====================
+
+    def _get_profile_path(self) -> Path:
+        """Get the path to profile.json for storing bot notes."""
+        return self.data_dir / "profile.json"
+
+    def _load_profile(self) -> dict:
+        """Load profile data."""
+        path = self._get_profile_path()
+        if path.exists():
+            try:
+                return json.loads(path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                pass
+        return {}
+
+    def _save_profile(self, profile: dict):
+        """Save profile data."""
+        path = self._get_profile_path()
+        path.write_text(
+            json.dumps(profile, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+    async def generate_bot_dynamic(self):
+        """Generate a short bot dynamic/status note and save to footprints.
+
+        This creates a casual, in-character note from the bot's perspective,
+        like a status update or a thought he wants to share.
+        """
+        try:
+            provider = self.context.get_using_provider()
+            if not provider:
+                return
+
+            # build context for the dynamic
+            context_parts = []
+
+            # what time is it?
+            from datetime import datetime
+
+            now = datetime.now()
+            hour = now.hour
+            if hour < 6:
+                time_context = "现在是深夜"
+            elif hour < 9:
+                time_context = "现在是早晨"
+            elif hour < 12:
+                time_context = "现在是上午"
+            elif hour < 14:
+                time_context = "现在是中午"
+            elif hour < 18:
+                time_context = "现在是下午"
+            elif hour < 22:
+                time_context = "现在是晚上"
+            else:
+                time_context = "现在是深夜"
+            context_parts.append(time_context)
+
+            # recent reading activity
+            books = self.book_manager.list_books()
+            if books and self.progress:
+                recent_book = None
+                for book in books:
+                    prog = self.progress.get(book["id"])
+                    if prog:
+                        recent_book = prog.get("book_title", book.get("title", ""))
+                        break
+                if recent_book:
+                    context_parts.append(f"最近在读《{recent_book}》")
+
+            # recent memories
+            recent_memory = ""
+            for book_id, chapters in self.memories.items():
+                if chapters:
+                    sorted_chs = sorted(chapters.items(), key=lambda x: int(x[0]))
+                    if sorted_chs:
+                        recent_memory = sorted_chs[-1][1][:100]
+                        break
+            if recent_memory:
+                context_parts.append(f"最近的阅读感受：{recent_memory}")
+
+            context_str = "。".join(context_parts)
+
+            prompt = (
+                f"背景：{context_str}\n\n"
+                "请用一两句话写一条随手记录的动态/碎碎念。"
+                "风格要求：像是随手写在便签纸上的话，简短、自然、有生活气息。"
+                "可以是：对刚读的书的一句感想、此刻的心情、想对她说的一句话、"
+                "一个有趣的念头、或者日常的小事。"
+                "不要太正式，不要用引号，不要超过40个字。"
+                "直接输出内容，不要加任何前缀或解释。"
+            )
+
+            resp = await provider.text_chat(prompt=prompt, system_prompt="")
+            note_text = (resp.completion_text or "").strip()
+
+            if not note_text or len(note_text) > 100:
+                return
+
+            # save to profile footprints
+            profile = self._load_profile()
+            footprints = profile.get("footprints", [])
+
+            bot_note = {
+                "id": f"bot_{int(time.time())}_{random.randint(100, 999)}",
+                "type": "bot_note",
+                "content": note_text,
+                "created_at": int(time.time()),
+                "rotation": random.randint(-6, 6),
+            }
+            footprints.append(bot_note)
+            profile["footprints"] = footprints
+            self._save_profile(profile)
+
+            logger.info(f"乌鲁鲁星: Bot 动态已生成: {note_text[:30]}...")
+
+        except Exception as e:
+            logger.error(f"乌鲁鲁星: 生成 Bot 动态失败: {e}", exc_info=True)
+
+    def start_dynamics(self):
+        """Start the bot dynamics background task."""
+        bot_config = self.config.get("bot_reading", {})
+        if not bot_config.get("enabled", True):
+            return
+        self._dynamics_task = asyncio.create_task(self._dynamics_loop())
+        logger.info("乌鲁鲁星: Bot 动态任务已启动")
+
+    async def _dynamics_loop(self):
+        """Background loop: periodically generate bot dynamics."""
+        # wait 30 minutes after startup before first dynamic
+        await asyncio.sleep(1800)
+
+        while self._running:
+            try:
+                await self.generate_bot_dynamic()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"乌鲁鲁星: Bot 动态循环出错: {e}", exc_info=True)
+
+            # wait between dynamics (configurable, default 4-8 hours)
+            bot_config = self.config.get("bot_reading", {})
+            interval_min = bot_config.get("dynamics_interval_min", 4)
+            interval_max = bot_config.get("dynamics_interval_max", 8)
+            if interval_min > interval_max:
+                interval_min, interval_max = interval_max, interval_min
+            wait_hours = random.uniform(interval_min, interval_max)
+            await asyncio.sleep(wait_hours * 3600)

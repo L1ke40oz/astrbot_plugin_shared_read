@@ -31,6 +31,7 @@ async function init() {
   restoreProfile();
   await loadFrontendConfig();
   await loadBooks();
+  await syncHighlightsFromServer();
   // restore last selected book (after books are loaded so we can get the title)
   var lastBook = localStorage.getItem("shared_read_progress_selected_book");
   if (lastBook && state.books.find(function (b) { return b.id === lastBook; })) {
@@ -40,6 +41,7 @@ async function init() {
     await startSession(lastBook);
   }
   bindEvents();
+  loadFootprints();
 }
 
 // ==================== Profile Sync ====================
@@ -76,6 +78,41 @@ async function loadProfileFromServer() {
     }
   } catch (e) {
     // offline or first run, use localStorage as-is
+  }
+}
+
+async function syncHighlightsFromServer() {
+  // Sync highlights from server to localStorage for cross-device consistency.
+  // Server is the source of truth; local highlights are merged in.
+  try {
+    if (!state.books || state.books.length === 0) return;
+    var serverAll = {};
+    for (var i = 0; i < state.books.length; i++) {
+      var bookId = state.books[i].id;
+      var bookTitle = state.books[i].title || "";
+      var res = await apiGet("data/" + bookId + "/highlights");
+      if (res.success && res.highlights && res.highlights.length > 0) {
+        // Convert server format to localStorage format
+        serverAll[bookId] = res.highlights.map(function (h) {
+          return {
+            chapter: h.chapter_index,
+            chapterTitle: h.chapterTitle || ("第" + ((h.chapter_index || 0) + 1) + "章"),
+            text: h.text,
+            context: h.context || "",
+            time: h.created_at ? h.created_at * 1000 : Date.now(),
+          };
+        });
+      }
+    }
+    if (Object.keys(serverAll).length === 0) return;
+    // Server data replaces local data for books that have server highlights
+    var localAll = getAllHighlights();
+    Object.keys(serverAll).forEach(function (bookId) {
+      localAll[bookId] = serverAll[bookId];
+    });
+    localStorage.setItem(HIGHLIGHTS_KEY, JSON.stringify(localAll));
+  } catch (e) {
+    // offline, keep localStorage as-is
   }
 }
 
@@ -122,6 +159,11 @@ async function loadFrontendConfig() {
       } catch (e) {
         console.warn("Invalid message_separator regex:", result.message_separator);
       }
+    }
+    // hide pet house section if disabled in config
+    if (result.success && result.pet_house_enabled === false) {
+      var petSection = document.getElementById("pet-house-section");
+      if (petSection) petSection.style.display = "none";
     }
   } catch (e) {
     // use default if config fetch fails
@@ -523,13 +565,18 @@ function switchTab(tabName) {
   if (tabName === "tools") {
     loadMemoryData();
     loadBotActivity();
-    loadConnectionInfo();
     loadNoteBox();
+    loadReadingProgress();
+    loadPetHouse();
   }
+  // load footprints when switching to footprints tab
+  if (tabName === "footprints") loadFootprints();
   // load stats on home tab
   if (tabName === "home") {
     loadStats();
   }
+  // load connection info on settings tab
+  if (tabName === "settings") loadConnectionInfo();
 }
 
 // ==================== Events ====================
@@ -603,6 +650,45 @@ function bindEvents() {
 
   // set home as active on load
   switchTab("home");
+
+  // Footprints sub-tab switching
+  document.querySelectorAll(".fp-tab-btn").forEach(function(btn) {
+    btn.addEventListener("click", function() {
+      document.querySelectorAll(".fp-tab-btn").forEach(function(b) { b.classList.remove("active"); });
+      document.querySelectorAll(".fp-panel").forEach(function(p) { p.classList.remove("active"); });
+      btn.classList.add("active");
+      var panel = document.getElementById("fp-" + btn.dataset.fptab);
+      if (panel) panel.classList.add("active");
+      // load content for the selected sub-tab
+      if (btn.dataset.fptab === "photos") loadFootprints();
+      else if (btn.dataset.fptab === "notes") loadFpNotes();
+      else if (btn.dataset.fptab === "moments") loadFpMoments();
+    });
+  });
+
+  // Footprints photo upload
+  var fpBtn = document.getElementById("footprints-upload-btn");
+  var fpInput = document.getElementById("footprints-file-input");
+  if (fpBtn && fpInput) {
+    fpBtn.addEventListener("click", function() { fpInput.click(); });
+    fpInput.addEventListener("change", function() {
+      if (fpInput.files && fpInput.files[0]) {
+        uploadFootprint(fpInput.files[0]);
+        fpInput.value = "";
+      }
+    });
+  }
+
+  // Footprints write note
+  var fpWriteBtn = document.getElementById("fp-write-note-btn");
+  if (fpWriteBtn) {
+    fpWriteBtn.addEventListener("click", function() {
+      var text = prompt("写一张便签给他：");
+      if (text && text.trim()) {
+        postFpNote(text.trim());
+      }
+    });
+  }
 
   // reader events
   bindReaderEvents();
@@ -1418,6 +1504,8 @@ function removeHighlight(bookId, chapterIndex, text) {
     all[bookId].splice(idx, 1);
     if (all[bookId].length === 0) delete all[bookId];
     localStorage.setItem(HIGHLIGHTS_KEY, JSON.stringify(all));
+    // sync deletion to server
+    apiDelete("data/" + bookId + "/highlights", {text: text, chapter_index: chapterIndex});
   }
 }
 
@@ -1458,6 +1546,21 @@ function applyHighlights() {
   body.innerHTML = html;
 }
 
+function scrollToHighlight(text) {
+  var body = document.getElementById("reader-body");
+  if (!body) return;
+  var marks = body.querySelectorAll("mark.user-highlight");
+  for (var i = 0; i < marks.length; i++) {
+    if (marks[i].textContent === text) {
+      marks[i].scrollIntoView({ behavior: "smooth", block: "center" });
+      // brief flash effect to draw attention
+      marks[i].style.outline = "2px solid var(--primary)";
+      setTimeout(function () { marks[i].style.outline = ""; }, 2000);
+      return;
+    }
+  }
+}
+
 // ==================== Notes Tab ====================
 
 function renderNotesTab() {
@@ -1496,7 +1599,7 @@ function renderNotesTab() {
   var cardsHtml = Object.keys(byChapter).sort(function (a, b) { return a - b; }).map(function (chIdx) {
     var group = byChapter[chIdx];
     var itemsHtml = group.items.map(function (h) {
-      return '<div class="note-item" data-jump-book="' + currentNoteBook + '" data-jump-chapter="' + h.chapter + '" title="点击跳转到原文">' +
+      return '<div class="note-item" data-jump-book="' + currentNoteBook + '" data-jump-chapter="' + h.chapter + '" data-jump-text="' + escapeAttr(h.text) + '" title="点击跳转到原文">' +
         '<div class="note-item-content">' + formatHighlightWithContext(h) + '</div>' +
         '<button class="note-delete-btn" data-book-id="' + currentNoteBook + '" data-text="' + escapeAttr(h.text) + '" data-chapter="' + h.chapter + '" title="删除划线">×</button>' +
         '</div>';
@@ -1519,10 +1622,17 @@ function renderNotesTab() {
       if (e.target.closest(".note-delete-btn")) return;
       var bookId = item.dataset.jumpBook;
       var chapter = parseInt(item.dataset.jumpChapter);
+      var jumpText = item.dataset.jumpText || "";
       if (bookId && !isNaN(chapter)) {
         openReader(bookId);
-        // wait for chapters to load, then jump to the specific chapter
-        setTimeout(function () { loadChapterContent(chapter); }, 500);
+        // wait for chapters to load, then jump to the specific chapter and scroll to highlight
+        setTimeout(function () {
+          loadChapterContent(chapter);
+          if (jumpText) {
+            // wait for content to render and highlights to apply, then scroll to the mark
+            setTimeout(function () { scrollToHighlight(jumpText); }, 400);
+          }
+        }, 500);
       }
     });
   });
@@ -1586,6 +1696,438 @@ function formatHighlightText(text) {
   return '<span class="note-highlight-text">' + escapeHtml(text) + '</span>';
 }
 
+// ==================== Footprints Board ====================
+
+async function loadFootprints() {
+  var board = document.getElementById("footprints-board");
+  if (!board) return;
+
+  try {
+    var res = await apiGet("footprints?type=photo");
+    if (!res.success) return;
+
+    var items = (res.items || []).filter(function(i) { return i.type === "photo"; });
+    if (items.length === 0) {
+      board.innerHTML = '<div class="footprints-empty">还没有照片，贴一张开始吧 ✦</div>';
+      return;
+    }
+
+    board.innerHTML = "";
+    items.forEach(function(item) {
+      var div = document.createElement("div");
+      div.className = "footprint-item";
+      div.style.transform = "rotate(" + (item.rotation || 0) + "deg)";
+      div.innerHTML = '<div class="footprint-pin"></div>' +
+        '<div class="footprint-photo">' +
+        '<img src="/assets/footprints/thumbs/' + item.filename + '" alt="" loading="lazy" />' +
+        (item.caption ? '<div class="footprint-caption">' + escapeHtml(item.caption) + '</div>' : '') +
+        '</div>' +
+        '<button class="footprint-delete" data-id="' + item.id + '">×</button>';
+      div.querySelector(".footprint-photo").addEventListener("click", function() {
+        openLightbox("/assets/footprints/originals/" + item.filename);
+      });
+      div.querySelector(".footprint-delete").addEventListener("click", function(e) {
+        e.stopPropagation();
+        if (confirm("删除这张照片？")) { deleteFootprint(item.id); }
+      });
+      board.appendChild(div);
+    });
+  } catch(e) {
+    board.innerHTML = '<div class="footprints-empty">还没有照片，贴一张开始吧 ✦</div>';
+  }
+}
+
+// === Sticky Notes (便签板) ===
+
+var fpNotesState = {
+  notes: [],
+  currentPage: 0,
+  perPage: 6,
+  dragState: null
+};
+
+async function loadFpNotes() {
+  var list = document.getElementById("fp-notes-list");
+  if (!list) return;
+
+  try {
+    var res = await apiGet("footprints/notes");
+    if (!res.success) { renderFpNotesEmpty(list); return; }
+
+    var notes = res.notes || [];
+    if (notes.length === 0) {
+      renderFpNotesEmpty(list);
+      return;
+    }
+
+    fpNotesState.notes = notes;
+    var totalPages = Math.ceil(notes.length / fpNotesState.perPage);
+    if (fpNotesState.currentPage >= totalPages) {
+      fpNotesState.currentPage = Math.max(0, totalPages - 1);
+    }
+    renderFpNotesPage();
+  } catch(e) {
+    renderFpNotesEmpty(document.getElementById("fp-notes-list"));
+  }
+}
+
+function renderFpNotesEmpty(list) {
+  list.innerHTML = '<div class="fp-notes-empty">写一张便签给他吧 ✦</div>';
+  // remove pagination if present
+  var pag = document.getElementById("fp-notes-pagination");
+  if (pag) pag.style.display = "none";
+}
+
+function renderFpNotesPage() {
+  var list = document.getElementById("fp-notes-list");
+  if (!list) return;
+
+  var notes = fpNotesState.notes;
+  var start = fpNotesState.currentPage * fpNotesState.perPage;
+  var pageNotes = notes.slice(start, start + fpNotesState.perPage);
+
+  list.innerHTML = "";
+
+  pageNotes.forEach(function(pair) {
+    var group = document.createElement("div");
+    group.className = "fp-note-group";
+    group.dataset.noteId = pair.id;
+
+    // Position from server data
+    var posX = pair.pos_x !== undefined ? pair.pos_x : Math.random() * 70 + 5;
+    var posY = pair.pos_y !== undefined ? pair.pos_y : Math.random() * 70 + 5;
+    group.style.left = posX + "%";
+    group.style.top = posY + "%";
+
+    // random rotation for the group
+    var rotation = (Math.random() * 10 - 5).toFixed(1);
+    group.style.transform = "rotate(" + rotation + "deg)";
+    group.dataset.rotation = rotation;
+
+    // pin
+    var pin = document.createElement("div");
+    pin.className = "fp-note-pin";
+    group.appendChild(pin);
+
+    // user note
+    var userDiv = document.createElement("div");
+    userDiv.className = "fp-note-item user";
+    var userTime = pair.created_at ? new Date(pair.created_at * 1000).toLocaleDateString() : "";
+    userDiv.innerHTML = '<div class="fp-note-content">' + escapeHtml(pair.content) + '</div>' +
+      '<div class="fp-note-time">' + userTime + '</div>';
+    group.appendChild(userDiv);
+
+    // delete button
+    var delBtn = document.createElement("button");
+    delBtn.className = "footprint-delete";
+    delBtn.textContent = "\u00d7";
+    delBtn.addEventListener("click", function(e) {
+      e.stopPropagation();
+      e.preventDefault();
+      if (confirm("删掉这张便签？")) { deleteFpNote(pair.id); }
+    });
+    group.appendChild(delBtn);
+
+    // bot reply (overlapping, pinned on top of user note)
+    if (pair.reply) {
+      var botDiv = document.createElement("div");
+      botDiv.className = "fp-note-item bot-reply";
+      var botRotation = (Math.random() * 8 - 4).toFixed(1);
+      botDiv.style.transform = "rotate(" + botRotation + "deg)";
+      var botTime = pair.reply_at ? new Date(pair.reply_at * 1000).toLocaleDateString() : "";
+      botDiv.innerHTML = '<div class="fp-note-content">' + escapeHtml(pair.reply) + '</div>' +
+        '<div class="fp-note-time">' + botTime + '</div>';
+      group.appendChild(botDiv);
+    }
+
+    // Drag handling
+    initNoteDrag(group);
+
+    list.appendChild(group);
+  });
+
+  renderFpNotesPagination();
+}
+
+function renderFpNotesPagination() {
+  var totalPages = Math.ceil(fpNotesState.notes.length / fpNotesState.perPage);
+  var container = document.getElementById("fp-notes-pagination");
+
+  // Create pagination container if it doesn't exist
+  if (!container) {
+    container = document.createElement("div");
+    container.id = "fp-notes-pagination";
+    container.className = "fp-notes-pagination";
+    var list = document.getElementById("fp-notes-list");
+    list.parentNode.insertBefore(container, list.nextSibling);
+  }
+
+  if (totalPages <= 1) {
+    container.style.display = "none";
+    return;
+  }
+
+  container.style.display = "flex";
+  container.innerHTML = "";
+
+  // prev button
+  var prevBtn = document.createElement("button");
+  prevBtn.className = "shelf-nav-btn" + (fpNotesState.currentPage === 0 ? " hidden" : "");
+  prevBtn.textContent = "\u2039";
+  prevBtn.addEventListener("click", function() {
+    if (fpNotesState.currentPage > 0) {
+      fpNotesState.currentPage--;
+      renderFpNotesPage();
+    }
+  });
+  container.appendChild(prevBtn);
+
+  // dots
+  var dotsDiv = document.createElement("div");
+  dotsDiv.className = "shelf-pagination";
+  for (var i = 0; i < totalPages; i++) {
+    var dot = document.createElement("button");
+    dot.className = "page-dot" + (i === fpNotesState.currentPage ? " active" : "");
+    dot.dataset.page = i;
+    dot.addEventListener("click", function() {
+      fpNotesState.currentPage = parseInt(this.dataset.page);
+      renderFpNotesPage();
+    });
+    dotsDiv.appendChild(dot);
+  }
+  container.appendChild(dotsDiv);
+
+  // next button
+  var nextBtn = document.createElement("button");
+  nextBtn.className = "shelf-nav-btn" + (fpNotesState.currentPage >= totalPages - 1 ? " hidden" : "");
+  nextBtn.textContent = "\u203a";
+  nextBtn.addEventListener("click", function() {
+    if (fpNotesState.currentPage < totalPages - 1) {
+      fpNotesState.currentPage++;
+      renderFpNotesPage();
+    }
+  });
+  container.appendChild(nextBtn);
+}
+
+function initNoteDrag(group) {
+  var startX, startY, origLeft, origTop, hasMoved, pointerId;
+  var DRAG_THRESHOLD = 5;
+
+  function onPointerDown(e) {
+    // Don't start drag on delete button
+    if (e.target.closest(".footprint-delete")) return;
+
+    e.preventDefault(); // prevent text selection from interfering with drag
+
+    startX = e.clientX;
+    startY = e.clientY;
+    hasMoved = false;
+    pointerId = e.pointerId;
+
+    var list = document.getElementById("fp-notes-list");
+    var rect = list.getBoundingClientRect();
+    var groupRect = group.getBoundingClientRect();
+    origLeft = groupRect.left - rect.left;
+    origTop = groupRect.top - rect.top;
+
+    group.setPointerCapture(e.pointerId);
+    group.addEventListener("pointermove", onPointerMove);
+    group.addEventListener("pointerup", onPointerUp);
+    group.addEventListener("pointercancel", onPointerUp);
+  }
+
+  function onPointerMove(e) {
+    var dx = e.clientX - startX;
+    var dy = e.clientY - startY;
+
+    if (!hasMoved && Math.abs(dx) < DRAG_THRESHOLD && Math.abs(dy) < DRAG_THRESHOLD) {
+      return;
+    }
+
+    if (!hasMoved) {
+      hasMoved = true;
+      group.classList.add("dragging");
+      // Remove rotation during drag for cleaner movement
+      group.style.transform = "rotate(0deg)";
+    }
+
+    var list = document.getElementById("fp-notes-list");
+    var rect = list.getBoundingClientRect();
+    var newLeft = origLeft + dx;
+    var newTop = origTop + dy;
+
+    // Clamp within container
+    newLeft = Math.max(0, Math.min(rect.width - 40, newLeft));
+    newTop = Math.max(0, Math.min(rect.height - 40, newTop));
+
+    // Convert to percentage
+    var pctX = (newLeft / rect.width) * 100;
+    var pctY = (newTop / rect.height) * 100;
+
+    group.style.left = pctX + "%";
+    group.style.top = pctY + "%";
+  }
+
+  function onPointerUp(e) {
+    group.removeEventListener("pointermove", onPointerMove);
+    group.removeEventListener("pointerup", onPointerUp);
+    group.removeEventListener("pointercancel", onPointerUp);
+
+    try { group.releasePointerCapture(pointerId); } catch(ex) {}
+
+    if (hasMoved) {
+      group.classList.remove("dragging");
+      // Restore rotation
+      var rotation = group.dataset.rotation || "0";
+      group.style.transform = "rotate(" + rotation + "deg)";
+
+      // Save new position to server
+      var noteId = group.dataset.noteId;
+      var list = document.getElementById("fp-notes-list");
+      var rect = list.getBoundingClientRect();
+      var groupRect = group.getBoundingClientRect();
+      var pctX = ((groupRect.left - rect.left) / rect.width) * 100;
+      var pctY = ((groupRect.top - rect.top) / rect.height) * 100;
+
+      // Clamp
+      pctX = Math.max(0, Math.min(95, pctX));
+      pctY = Math.max(0, Math.min(95, pctY));
+
+      apiPost("footprints/notes/" + noteId + "/position", {
+        pos_x: Math.round(pctX * 10) / 10,
+        pos_y: Math.round(pctY * 10) / 10
+      }).catch(function() {});
+    }
+  }
+
+  group.addEventListener("pointerdown", onPointerDown);
+}
+
+async function postFpNote(text) {
+  await apiPost("footprints/note", { content: text });
+  loadFpNotes();
+}
+
+async function deleteFpNote(id) {
+  await apiDelete("footprints/notes/" + id);
+  loadFpNotes();
+}
+
+// === Bot Moments (他的动态) ===
+
+async function loadFpMoments() {
+  var list = document.getElementById("fp-moments-list");
+  if (!list) return;
+
+  try {
+    var res = await apiGet("footprints/moments");
+    if (!res.success) { list.innerHTML = '<div class="fp-moments-empty">他还没有发动态 ✦</div>'; return; }
+
+    var moments = res.moments || [];
+    if (moments.length === 0) {
+      list.innerHTML = '<div class="fp-moments-empty">他还没有发动态 ✦</div>';
+      return;
+    }
+
+    list.innerHTML = "";
+    moments.forEach(function(m) {
+      var card = document.createElement("div");
+      card.className = "fp-moment-card";
+
+      var timeStr = m.created_at ? new Date(m.created_at * 1000).toLocaleString() : "";
+      var liked = m.liked ? " liked" : "";
+      var likeText = m.liked ? "♥" : "♡";
+      var likeCount = m.like_count || 0;
+      var botNick = localStorage.getItem(BOT_NICKNAME_KEY) || "沈星回";
+      var userNick = localStorage.getItem(USER_NICKNAME_KEY) || "我";
+
+      var repliesHtml = "";
+      if (m.replies && m.replies.length > 0) {
+        repliesHtml = '<div class="fp-moment-replies">';
+        m.replies.forEach(function(r) {
+          var rName = r.role === "user" ? userNick : (botNick + " 回复 " + userNick);
+          repliesHtml += '<div class="fp-moment-reply"><span class="reply-name">' + escapeHtml(rName) + '：</span>' + escapeHtml(r.content) + '</div>';
+        });
+        repliesHtml += '</div>';
+      }
+
+      var botAvatar = localStorage.getItem(BOT_AVATAR_KEY);
+      var avatarStyle = botAvatar
+        ? ' style="background-image:url(' + botAvatar + ');background-size:cover;background-position:center;"'
+        : '';
+      var avatarFallback = botAvatar ? '' : '✦';
+
+      card.innerHTML =
+        '<div class="fp-moment-header">' +
+          '<div class="fp-moment-avatar"' + avatarStyle + '>' + avatarFallback + '</div>' +
+          '<span class="fp-moment-name">' + escapeHtml(botNick) + '</span>' +
+          '<span class="fp-moment-time">' + timeStr + '</span>' +
+        '</div>' +
+        '<div class="fp-moment-content">' + escapeHtml(m.content) + '</div>' +
+        repliesHtml +
+        '<div class="fp-moment-actions">' +
+          '<button class="fp-moment-action-btn' + liked + '" data-id="' + m.id + '" data-action="like">' + likeText + ' ' + (likeCount > 0 ? likeCount : '') + '</button>' +
+          '<button class="fp-moment-action-btn" data-id="' + m.id + '" data-action="reply">💬 回复</button>' +
+        '</div>';
+
+      // bind actions
+      card.querySelector('[data-action="like"]').addEventListener("click", function() {
+        likeMoment(m.id);
+      });
+      card.querySelector('[data-action="reply"]').addEventListener("click", function() {
+        var text = prompt("回复他的动态：");
+        if (text && text.trim()) { replyMoment(m.id, text.trim()); }
+      });
+
+      list.appendChild(card);
+    });
+  } catch(e) {
+    list.innerHTML = '<div class="fp-moments-empty">他还没有发动态 ✦</div>';
+  }
+}
+
+async function likeMoment(id) {
+  await apiPost("footprints/moments/" + id + "/like", {});
+  loadFpMoments();
+}
+
+async function replyMoment(id, text) {
+  await apiPost("footprints/moments/" + id + "/reply", { content: text });
+  loadFpMoments();
+}
+
+// === Photo helpers ===
+
+function openLightbox(src) {
+  var lb = document.getElementById("footprint-lightbox");
+  if (!lb) {
+    lb = document.createElement("div");
+    lb.id = "footprint-lightbox";
+    lb.className = "footprint-lightbox";
+    lb.innerHTML = '<button class="footprint-lightbox-close">×</button><img src="" alt="" />';
+    lb.addEventListener("click", function() { lb.classList.remove("open"); });
+    document.body.appendChild(lb);
+  }
+  lb.querySelector("img").src = src;
+  lb.classList.add("open");
+}
+
+async function deleteFootprint(id) {
+  await apiDelete("footprints/" + id);
+  loadFootprints();
+}
+
+async function uploadFootprint(file) {
+  var formData = new FormData();
+  formData.append("file", file);
+  try {
+    var resp = await fetch(API_BASE + "/api/footprints/upload", { method: "POST", body: formData });
+    var res = await resp.json();
+    if (res.success) loadFootprints();
+  } catch(e) { console.error("Upload failed:", e); }
+}
+
 // ==================== Helpers ====================
 
 async function apiPost(endpoint, body) {
@@ -1599,6 +2141,24 @@ async function apiPost(endpoint, body) {
 
 async function apiGet(endpoint) {
   var resp = await fetch(API_BASE + "/api/" + endpoint);
+  return resp.json();
+}
+
+async function apiDelete(endpoint, body) {
+  var resp = await fetch(API_BASE + "/api/" + endpoint, {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  return resp.json();
+}
+
+async function apiPut(endpoint, body) {
+  var resp = await fetch(API_BASE + "/api/" + endpoint, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
   return resp.json();
 }
 
@@ -1969,6 +2529,81 @@ async function loadBotActivity() {
         ' 已读 ' + item.percent + '%' +
         '</div>';
     }).join("");
+  } catch (e) {
+    container.innerHTML = '<div class="memory-empty">加载失败</div>';
+  }
+}
+
+// ==================== Reading Progress (阅读进度) ====================
+
+async function loadReadingProgress() {
+  var container = document.getElementById("reading-progress-list");
+  if (!container) return;
+  try {
+    var res = await apiGet("reading-progress");
+    if (!res.success) {
+      container.innerHTML = '<div class="memory-empty">加载失败</div>';
+      return;
+    }
+
+    var botProgress = res.bot_progress || [];
+    var userProgress = res.user_progress || [];
+
+    if (botProgress.length === 0 && userProgress.length === 0) {
+      container.innerHTML = '<div class="memory-empty">还没有阅读进度数据</div>';
+      return;
+    }
+
+    var botNick = localStorage.getItem(BOT_NICKNAME_KEY) || "沈星回";
+    var userNick = localStorage.getItem(USER_NICKNAME_KEY) || "你";
+
+    var html = "";
+
+    // Bot progress sub-section
+    html += '<div class="rp-subsection">';
+    html += '<div class="rp-subsection-title">✦ ' + escapeHtml(botNick) + '的进度</div>';
+    if (botProgress.length === 0) {
+      html += '<div class="rp-empty">还没有开始读书</div>';
+    } else {
+      html += botProgress.map(function (item) {
+        var pct = Math.min(100, Math.max(0, item.percentage || 0));
+        return '<div class="rp-book-item">' +
+          '<div class="rp-book-title">《' + escapeHtml(item.book_title) + '》</div>' +
+          '<div class="rp-book-detail">第' + item.current_chapter + '章 / 共' + item.total_chapters + '章</div>' +
+          '<div class="rp-bar-wrapper">' +
+            '<div class="rp-bar-track">' +
+              '<div class="rp-bar-fill bot" style="width: ' + pct + '%"></div>' +
+            '</div>' +
+            '<span class="rp-bar-pct">' + pct.toFixed(1) + '%</span>' +
+          '</div>' +
+        '</div>';
+      }).join("");
+    }
+    html += '</div>';
+
+    // User progress sub-section
+    html += '<div class="rp-subsection">';
+    html += '<div class="rp-subsection-title">✦ ' + escapeHtml(userNick) + '的进度</div>';
+    if (userProgress.length === 0) {
+      html += '<div class="rp-empty">还没有开始读书</div>';
+    } else {
+      html += userProgress.map(function (item) {
+        var pct = Math.min(100, Math.max(0, item.percentage || 0));
+        return '<div class="rp-book-item">' +
+          '<div class="rp-book-title">《' + escapeHtml(item.book_title) + '》</div>' +
+          '<div class="rp-book-detail">第' + item.current_chapter + '章 / 共' + item.total_chapters + '章</div>' +
+          '<div class="rp-bar-wrapper">' +
+            '<div class="rp-bar-track">' +
+              '<div class="rp-bar-fill user" style="width: ' + pct + '%"></div>' +
+            '</div>' +
+            '<span class="rp-bar-pct">' + pct.toFixed(1) + '%</span>' +
+          '</div>' +
+        '</div>';
+      }).join("");
+    }
+    html += '</div>';
+
+    container.innerHTML = html;
   } catch (e) {
     container.innerHTML = '<div class="memory-empty">加载失败</div>';
   }
@@ -2375,3 +3010,408 @@ async function deleteCurrentArchive() {
     }
   });
 })();
+
+
+// ==================== Pet House ====================
+
+var petHouseState = {
+  pets: [],
+  pendingDeleteId: null,
+};
+
+/**
+ * Render a single pet card HTML string from pet data.
+ * @param {object} pet - { id, name, species, hunger, mood, photo_filename, animation_state }
+ * @returns {string} HTML string for the pet card
+ */
+function renderPetCardHtml(pet) {
+  var animState = pet.animation_state || "idle";
+  var hungerPct = Math.min(100, Math.max(0, pet.hunger || 0));
+  var moodPct = Math.min(100, Math.max(0, pet.mood || 0));
+  var speciesClass = "pet-sprite-" + (pet.species || "cat");
+
+  var photoHtml = "";
+  if (pet.photo_filename) {
+    photoHtml = '<img class="pet-card-photo" src="' + API_BASE + '/api/pets/' + pet.id + '/photo" alt="" />';
+  }
+
+  return '<div class="pet-card" data-pet-id="' + escapeAttr(pet.id) + '">' +
+    photoHtml +
+    '<button class="pet-card-delete-btn" data-pet-id="' + escapeAttr(pet.id) + '" title="删除">×</button>' +
+    '<div class="pet-sprite-area">' +
+      '<div class="pet-sprite ' + speciesClass + ' pet-anim-' + animState + '"></div>' +
+    '</div>' +
+    '<div class="pet-card-name" title="' + escapeAttr(pet.name) + '">' + escapeHtml(pet.name) + '</div>' +
+    '<div class="pet-status-bars">' +
+      '<div class="pet-bar-row">' +
+        '<span class="pet-bar-label">饱</span>' +
+        '<div class="pet-bar-track"><div class="pet-bar-fill hunger" style="width: ' + hungerPct + '%"></div></div>' +
+        '<span class="pet-bar-value">' + hungerPct + '</span>' +
+      '</div>' +
+      '<div class="pet-bar-row">' +
+        '<span class="pet-bar-label">心</span>' +
+        '<div class="pet-bar-track"><div class="pet-bar-fill mood" style="width: ' + moodPct + '%"></div></div>' +
+        '<span class="pet-bar-value">' + moodPct + '</span>' +
+      '</div>' +
+    '</div>' +
+    '<div class="pet-card-actions">' +
+      '<button class="pet-action-btn pet-btn-feed" data-pet-id="' + escapeAttr(pet.id) + '">🍖 投喂</button>' +
+      '<button class="pet-action-btn pet-btn-pet" data-pet-id="' + escapeAttr(pet.id) + '">🤚 摸摸</button>' +
+      '<button class="pet-action-btn pet-btn-customize" data-pet-id="' + escapeAttr(pet.id) + '" data-species="' + escapeAttr(pet.species || 'cat') + '">✨ 捏一捏</button>' +
+    '</div>' +
+  '</div>';
+}
+
+/**
+ * Render all pet cards into the grid.
+ * @param {Array} pets - array of pet data objects
+ */
+function renderPetHouse(pets) {
+  petHouseState.pets = pets || [];
+  var grid = document.getElementById("pet-cards-grid");
+  if (!grid) return;
+
+  if (petHouseState.pets.length === 0) {
+    grid.innerHTML = '<div class="memory-empty">还没有宠物，添加一只吧</div>';
+  } else {
+    grid.innerHTML = petHouseState.pets.map(renderPetCardHtml).join("");
+  }
+
+  // Bind delete buttons
+  grid.querySelectorAll(".pet-card-delete-btn").forEach(function (btn) {
+    btn.addEventListener("click", function (e) {
+      e.stopPropagation();
+      openPetDeleteConfirm(btn.dataset.petId);
+    });
+  });
+
+  // Bind feed buttons
+  grid.querySelectorAll(".pet-btn-feed").forEach(function (btn) {
+    btn.addEventListener("click", function (e) {
+      e.stopPropagation();
+      feedPet(btn.dataset.petId);
+    });
+  });
+
+  // Bind pet (摸摸) buttons
+  grid.querySelectorAll(".pet-btn-pet").forEach(function (btn) {
+    btn.addEventListener("click", function (e) {
+      e.stopPropagation();
+      petPet(btn.dataset.petId);
+    });
+  });
+
+  // Bind customize (捏一捏) buttons
+  grid.querySelectorAll(".pet-btn-customize").forEach(function (btn) {
+    btn.addEventListener("click", function (e) {
+      e.stopPropagation();
+      var petId = btn.dataset.petId;
+      var species = btn.dataset.species;
+      // Find the pet's customization_data from the loaded pets array
+      var pet = petHouseState.pets.find(function (p) { return p.id === petId; });
+      var customizationData = pet ? pet.customization_data : null;
+      openCustomizationUI(petId, species, customizationData);
+    });
+  });
+
+  // Apply dynamic sprites to all pet cards using the rendering engine.
+  // This replaces the old hardcoded CSS ::after box-shadow with JS-generated styles.
+  // Legacy pets (null customization_data) will use DEFAULT_CUSTOMIZATION fallback.
+  if (typeof applyAllPetSprites === "function") {
+    applyAllPetSprites(petHouseState.pets);
+  }
+}
+
+/**
+ * Load pet house data from server and render.
+ */
+async function loadPetHouse() {
+  // skip if pet house is disabled (section hidden)
+  var section = document.getElementById("pet-house-section");
+  if (section && section.style.display === "none") return;
+  var grid = document.getElementById("pet-cards-grid");
+  if (!grid) return;
+  try {
+    var res = await apiGet("pets");
+    if (res.success) {
+      renderPetHouse(res.pets || []);
+    } else {
+      grid.innerHTML = '<div class="memory-empty">加载失败</div>';
+    }
+  } catch (e) {
+    grid.innerHTML = '<div class="memory-empty">加载失败</div>';
+  }
+}
+
+// ==================== Pet Creation Modal ====================
+
+function openPetCreateModal() {
+  var modal = document.getElementById("pet-create-modal");
+  if (modal) {
+    // Reset form
+    var nameInput = document.getElementById("pet-name-input");
+    var speciesSelect = document.getElementById("pet-species-select");
+    var photoName = document.getElementById("pet-photo-name");
+    var photoInput = document.getElementById("pet-photo-input");
+    if (nameInput) nameInput.value = "";
+    if (speciesSelect) speciesSelect.selectedIndex = 0;
+    if (photoName) photoName.textContent = "未选择";
+    if (photoInput) photoInput.value = "";
+    modal.classList.add("open");
+  }
+}
+
+function closePetCreateModal() {
+  var modal = document.getElementById("pet-create-modal");
+  if (modal) modal.classList.remove("open");
+}
+
+async function confirmCreatePet() {
+  var nameInput = document.getElementById("pet-name-input");
+  var speciesSelect = document.getElementById("pet-species-select");
+  var name = nameInput ? nameInput.value.trim() : "";
+  var species = speciesSelect ? speciesSelect.value : "cat";
+
+  if (!name) {
+    nameInput.focus();
+    return;
+  }
+
+  try {
+    var res = await apiPost("pets", { name: name, species: species });
+    if (res.success && res.pet) {
+      var newPetId = res.pet.id;
+      // Upload photo if selected
+      var photoInput = document.getElementById("pet-photo-input");
+      if (photoInput && photoInput.files && photoInput.files[0]) {
+        await uploadPetPhoto(newPetId, photoInput.files[0]);
+      }
+      closePetCreateModal();
+      // Open customization UI for the new pet before displaying in main view.
+      // Pass null for existingData to initialize with default appearance
+      // (first template of species, orange primary, cream secondary, solid pattern, no accessory).
+      // On confirm: confirmCustomization() saves via PUT API then refreshes pet house.
+      // On cancel: pet already exists with no customization_data (renders with defaults),
+      // but we still need to refresh the view to show the new pet.
+      window._onCustomizationCancel = async function () {
+        await loadPetHouse();
+      };
+      openCustomizationUI(newPetId, species, null);
+    }
+  } catch (e) {
+    console.error("Failed to create pet:", e);
+  }
+}
+
+async function uploadPetPhoto(petId, file) {
+  var formData = new FormData();
+  formData.append("file", file);
+  try {
+    await fetch(API_BASE + "/api/pets/" + petId + "/photo", {
+      method: "POST",
+      body: formData,
+    });
+  } catch (e) {
+    console.error("Failed to upload pet photo:", e);
+  }
+}
+
+// ==================== Pet Delete Confirmation ====================
+
+function openPetDeleteConfirm(petId) {
+  petHouseState.pendingDeleteId = petId;
+  var overlay = document.getElementById("pet-delete-confirm");
+  if (overlay) overlay.classList.add("open");
+}
+
+function closePetDeleteConfirm() {
+  petHouseState.pendingDeleteId = null;
+  var overlay = document.getElementById("pet-delete-confirm");
+  if (overlay) overlay.classList.remove("open");
+}
+
+async function confirmDeletePet() {
+  var petId = petHouseState.pendingDeleteId;
+  if (!petId) return;
+  try {
+    var res = await apiDelete("pets/" + petId);
+    if (res.success) {
+      closePetDeleteConfirm();
+      await loadPetHouse();
+    }
+  } catch (e) {
+    console.error("Failed to delete pet:", e);
+  }
+  closePetDeleteConfirm();
+}
+
+// ==================== Pet Actions (feed/pet) ====================
+
+async function feedPet(petId) {
+  try {
+    var res = await apiPost("pets/" + petId + "/feed", {});
+    if (res.success) {
+      // Play eating animation temporarily
+      var card = document.querySelector('.pet-card[data-pet-id="' + petId + '"]');
+      if (card) {
+        var sprite = card.querySelector(".pet-sprite");
+        if (sprite) {
+          // Apply dynamic sprite with eating animation state
+          var pet = petHouseState.pets.find(function (p) { return p.id === petId; });
+          if (pet && typeof applyPetSprite === "function") {
+            var customData = pet.customization_data;
+            if (!customData && typeof DEFAULT_CUSTOMIZATION !== "undefined") {
+              customData = DEFAULT_CUSTOMIZATION[pet.species] || DEFAULT_CUSTOMIZATION.cat;
+            }
+            applyPetSprite(sprite, customData, pet.species, "eating");
+          } else {
+            // Fallback: just swap the animation class
+            sprite.className = sprite.className.replace(/pet-anim-\w+/g, "").trim();
+            sprite.classList.add("pet-anim-eating");
+          }
+          // Revert after 2s
+          setTimeout(function () {
+            loadPetHouse();
+          }, 2000);
+        }
+        // Update bars immediately (optimistic)
+        if (res.pet) {
+          var hungerFill = card.querySelector(".pet-bar-fill.hunger");
+          var hungerVal = card.querySelector(".pet-bar-row:first-child .pet-bar-value");
+          if (hungerFill) hungerFill.style.width = res.pet.hunger + "%";
+          if (hungerVal) hungerVal.textContent = res.pet.hunger;
+        }
+      }
+      // Show easter egg comment as toast
+      if (res.comment) {
+        showPetToast(res.comment);
+      }
+    }
+  } catch (e) {
+    console.error("Failed to feed pet:", e);
+  }
+}
+
+async function petPet(petId) {
+  try {
+    var res = await apiPost("pets/" + petId + "/pet", {});
+    if (res.success) {
+      // Play being_petted animation temporarily
+      var card = document.querySelector('.pet-card[data-pet-id="' + petId + '"]');
+      if (card) {
+        var sprite = card.querySelector(".pet-sprite");
+        if (sprite) {
+          // Apply dynamic sprite with being_petted animation state
+          var pet = petHouseState.pets.find(function (p) { return p.id === petId; });
+          if (pet && typeof applyPetSprite === "function") {
+            var customData = pet.customization_data;
+            if (!customData && typeof DEFAULT_CUSTOMIZATION !== "undefined") {
+              customData = DEFAULT_CUSTOMIZATION[pet.species] || DEFAULT_CUSTOMIZATION.cat;
+            }
+            applyPetSprite(sprite, customData, pet.species, "being_petted");
+          } else {
+            // Fallback: just swap the animation class
+            sprite.className = sprite.className.replace(/pet-anim-\w+/g, "").trim();
+            sprite.classList.add("pet-anim-petted");
+          }
+          setTimeout(function () {
+            loadPetHouse();
+          }, 2000);
+        }
+        // Update bars immediately (optimistic)
+        if (res.pet) {
+          var moodFill = card.querySelector(".pet-bar-fill.mood");
+          var moodVal = card.querySelector(".pet-bar-row:last-child .pet-bar-value");
+          if (moodFill) moodFill.style.width = res.pet.mood + "%";
+          if (moodVal) moodVal.textContent = res.pet.mood;
+        }
+      }
+      // Show easter egg comment as toast
+      if (res.comment) {
+        showPetToast(res.comment);
+      }
+    }
+  } catch (e) {
+    console.error("Failed to pet:", e);
+  }
+}
+
+// ==================== Pet Toast (Easter Egg Comments) ====================
+
+function showPetToast(message) {
+  // Reuse or create a toast element
+  var toast = document.getElementById("pet-toast");
+  if (!toast) {
+    toast = document.createElement("div");
+    toast.id = "pet-toast";
+    toast.className = "pet-toast";
+    document.body.appendChild(toast);
+  }
+  toast.textContent = "「" + message + "」";
+  toast.classList.add("show");
+  // Auto-dismiss after 3 seconds
+  clearTimeout(toast._timer);
+  toast._timer = setTimeout(function () {
+    toast.classList.remove("show");
+  }, 3000);
+}
+
+// ==================== Pet House Event Bindings ====================
+
+(function () {
+  document.addEventListener("DOMContentLoaded", function () {
+    // Add pet button
+    var addBtn = document.getElementById("pet-add-btn");
+    if (addBtn) {
+      addBtn.addEventListener("click", openPetCreateModal);
+    }
+
+    // Modal close button
+    var modalClose = document.getElementById("pet-modal-close");
+    if (modalClose) modalClose.addEventListener("click", closePetCreateModal);
+
+    // Modal cancel button
+    var modalCancel = document.getElementById("pet-modal-cancel");
+    if (modalCancel) modalCancel.addEventListener("click", closePetCreateModal);
+
+    // Modal confirm button
+    var modalConfirm = document.getElementById("pet-modal-confirm");
+    if (modalConfirm) modalConfirm.addEventListener("click", confirmCreatePet);
+
+    // Modal overlay click to close
+    var modalOverlay = document.getElementById("pet-create-modal");
+    if (modalOverlay) {
+      modalOverlay.addEventListener("click", function (e) {
+        if (e.target === modalOverlay) closePetCreateModal();
+      });
+    }
+
+    // Photo upload button
+    var photoBtn = document.getElementById("pet-photo-btn");
+    var photoInput = document.getElementById("pet-photo-input");
+    if (photoBtn && photoInput) {
+      photoBtn.addEventListener("click", function () { photoInput.click(); });
+      photoInput.addEventListener("change", function () {
+        var fileName = photoInput.files && photoInput.files[0] ? photoInput.files[0].name : "未选择";
+        var photoName = document.getElementById("pet-photo-name");
+        if (photoName) photoName.textContent = fileName;
+      });
+    }
+
+    // Delete confirmation buttons
+    var deleteCancel = document.getElementById("pet-delete-cancel");
+    if (deleteCancel) deleteCancel.addEventListener("click", closePetDeleteConfirm);
+
+    var deleteOk = document.getElementById("pet-delete-ok");
+    if (deleteOk) deleteOk.addEventListener("click", confirmDeletePet);
+
+    // Delete confirmation overlay click to close
+    var deleteOverlay = document.getElementById("pet-delete-confirm");
+    if (deleteOverlay) {
+      deleteOverlay.addEventListener("click", function (e) {
+        if (e.target === deleteOverlay) closePetDeleteConfirm();
+      });
+    }
+  });
+})();
+

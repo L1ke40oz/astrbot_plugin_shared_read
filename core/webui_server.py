@@ -8,20 +8,23 @@ Template loading priority:
 
 import asyncio
 import json
+import random
+import time
+import uuid
+from dataclasses import asdict
 from pathlib import Path
-from typing import Any
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Request, UploadFile, File
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from astrbot.api import logger
 
-from .session_manager import SessionManager
 from .book_manager import BookManager
 from .chat_engine import ChatEngine
+from .session_manager import SessionManager
 
 
 class WebUIServer:
@@ -124,6 +127,10 @@ class WebUIServer:
         # serve planet.png (and other template images) directly
         @app.get("/static/{filename:path}")
         async def serve_static_file(filename: str):
+            # check custom_templates first, then default
+            custom_path = self.custom_templates_dir / filename
+            if custom_path.exists() and custom_path.is_file():
+                return FileResponse(custom_path)
             path = self.default_templates_dir / filename
             if path.exists() and path.is_file():
                 return FileResponse(path)
@@ -142,11 +149,15 @@ class WebUIServer:
         async def api_frontend_config():
             """Return frontend-relevant config values."""
             separator = "\\$"
+            pet_house_enabled = True
             if self.plugin and hasattr(self.plugin, "config"):
                 separator = self.plugin.config.get("message_separator", "\\$")
+            if self.plugin and hasattr(self.plugin, "_pet_house_enabled"):
+                pet_house_enabled = self.plugin._pet_house_enabled
             return {
                 "success": True,
                 "message_separator": separator,
+                "pet_house_enabled": pet_house_enabled,
             }
 
         # --- Profile API (persistent user data) ---
@@ -185,7 +196,9 @@ class WebUIServer:
                 # no book selected yet, just acknowledge
                 return {"success": True, "session_active": False}
 
-            session = self.session_manager.get_or_create_book_session(book_id, book_title)
+            session = self.session_manager.get_or_create_book_session(
+                book_id, book_title
+            )
 
             # trigger AstrBot conversation snapshot in background
             if self.plugin and self.bot_reader and self.bot_reader.target_session:
@@ -233,7 +246,9 @@ class WebUIServer:
             if not file.filename or not (
                 file.filename.endswith(".epub") or file.filename.endswith(".txt")
             ):
-                raise HTTPException(400, detail="only .epub and .txt files are supported")
+                raise HTTPException(
+                    400, detail="only .epub and .txt files are supported"
+                )
 
             file_bytes = await file.read()
             try:
@@ -287,9 +302,14 @@ class WebUIServer:
                 if context_text:
                     note_content += f"\n（上下文：{context_text[:150]}）"
                 self.session_manager.add_chat_message(
-                    book_id, "user", note_content, metadata={"type": "highlight", "silent": True}
+                    book_id,
+                    "user",
+                    note_content,
+                    metadata={"type": "highlight", "silent": True},
                 )
-                logger.debug(f"乌鲁鲁星: 划线已记录到对话历史 book={book_id} text={text[:30]}")
+                logger.debug(
+                    f"乌鲁鲁星: 划线已记录到对话历史 book={book_id} text={text[:30]}"
+                )
             except Exception as e:
                 logger.warning(f"乌鲁鲁星: 划线记录到对话历史失败: {e}")
 
@@ -363,7 +383,7 @@ class WebUIServer:
 
         @app.post("/api/chapter/complete")
         async def api_chapter_complete(request: Request):
-            """Mark a chapter as complete (打卡) and trigger bot summary."""
+            """Mark a chapter as complete (打卡) and advance user progress by 1."""
             data = await request.json()
             book_id = data.get("book_id")
             chapter_index = data.get("chapter_index")
@@ -371,8 +391,22 @@ class WebUIServer:
             if not book_id or chapter_index is None:
                 raise HTTPException(400, detail="missing required fields")
 
-            # trigger bot summary generation in background
+            # advance user progress by 1 checkin
             if self.bot_reader:
+                total_chapters = 0
+                book_title = ""
+                books = self.book_manager.list_books()
+                book = next((b for b in books if b["id"] == book_id), None)
+                if book:
+                    book_title = book.get("title", "")
+                    chapters = self.book_manager.get_chapters(book_id)
+                    total_chapters = len(chapters) if chapters else 0
+
+                self.bot_reader.checkin_chapter(
+                    book_id, chapter_index, total_chapters, book_title
+                )
+
+                # trigger bot summary generation in background
                 asyncio.create_task(
                     self.bot_reader.generate_chapter_summary(book_id, chapter_index)
                 )
@@ -383,7 +417,19 @@ class WebUIServer:
 
         @app.get("/api/data/{book_id}/highlights")
         async def api_get_highlights(book_id: str):
-            return {"success": True, "highlights": self.book_manager.get_highlights(book_id)}
+            return {
+                "success": True,
+                "highlights": self.book_manager.get_highlights(book_id),
+            }
+
+        @app.delete("/api/data/{book_id}/highlights")
+        async def api_delete_highlight(book_id: str, request: Request):
+            """Delete a highlight by text match or index."""
+            data = await request.json()
+            text = data.get("text", "")
+            chapter_index = data.get("chapter_index")
+            success = self.book_manager.remove_highlight(book_id, text, chapter_index)
+            return {"success": success}
 
         @app.get("/api/data/{book_id}/reviews")
         async def api_get_reviews(book_id: str):
@@ -399,7 +445,10 @@ class WebUIServer:
         async def api_bot_progress(book_id: str):
             if not self.bot_reader:
                 return {"success": True, "percent": 0}
-            return {"success": True, "percent": self.bot_reader.get_bot_progress_percent(book_id)}
+            return {
+                "success": True,
+                "percent": self.bot_reader.get_bot_progress_percent(book_id),
+            }
 
         @app.get("/api/bot-memories")
         async def api_bot_memories():
@@ -413,13 +462,17 @@ class WebUIServer:
                 books = self.book_manager.list_books()
                 book = next((b for b in books if b["id"] == book_id), None)
                 book_title = book.get("title", "未知") if book else "未知"
-                for ch_idx, summary in sorted(chapters.items(), key=lambda x: int(x[0])):
-                    result.append({
-                        "book_id": book_id,
-                        "book_title": book_title,
-                        "chapter_index": int(ch_idx),
-                        "summary": summary,
-                    })
+                for ch_idx, summary in sorted(
+                    chapters.items(), key=lambda x: int(x[0])
+                ):
+                    result.append(
+                        {
+                            "book_id": book_id,
+                            "book_title": book_title,
+                            "chapter_index": int(ch_idx),
+                            "summary": summary,
+                        }
+                    )
             return {"success": True, "memories": result}
 
         # --- User progress API ---
@@ -446,7 +499,65 @@ class WebUIServer:
         async def api_user_progress(book_id: str):
             if not self.bot_reader:
                 return {"success": True, "percent": 0}
-            return {"success": True, "percent": self.bot_reader.get_user_progress_percent(book_id)}
+            return {
+                "success": True,
+                "percent": self.bot_reader.get_user_progress_percent(book_id),
+            }
+
+        # --- Reading Progress API ---
+
+        @app.get("/api/reading-progress")
+        async def api_reading_progress():
+            """Get bot and user reading progress for all books."""
+            books = self.book_manager.list_books()
+            bot_progress_list = []
+            user_progress_list = []
+
+            for book in books:
+                book_id = book["id"]
+                book_title = book.get("title", "未知")
+                chapters = self.book_manager.get_chapters(book_id)
+                total_chapters = (
+                    len(chapters) if chapters else book.get("chapter_count", 0)
+                )
+
+                if not total_chapters:
+                    continue
+
+                # bot progress
+                if self.bot_reader:
+                    bot_prog = self.bot_reader.progress.get(book_id)
+                    if bot_prog:
+                        bot_current = bot_prog.get("current_chapter", 0) + 1
+                        bot_pct = round(bot_current / total_chapters * 100, 1)
+                        bot_progress_list.append(
+                            {
+                                "book_title": book_title,
+                                "current_chapter": bot_current,
+                                "total_chapters": total_chapters,
+                                "percentage": min(bot_pct, 100.0),
+                            }
+                        )
+
+                    # user progress
+                    user_prog = self.bot_reader.user_progress.get(book_id)
+                    if user_prog:
+                        user_current = user_prog.get("current_chapter", 0) + 1
+                        user_pct = round(user_current / total_chapters * 100, 1)
+                        user_progress_list.append(
+                            {
+                                "book_title": book_title,
+                                "current_chapter": user_current,
+                                "total_chapters": total_chapters,
+                                "percentage": min(user_pct, 100.0),
+                            }
+                        )
+
+            return {
+                "success": True,
+                "bot_progress": bot_progress_list,
+                "user_progress": user_progress_list,
+            }
 
         # --- Reading Stats API ---
 
@@ -477,6 +588,7 @@ class WebUIServer:
                     ts = prog.get("last_read_at", 0)
                     if ts:
                         from datetime import datetime
+
                         day = datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
                         reading_days.add(day)
 
@@ -510,13 +622,16 @@ class WebUIServer:
             sessions = self.session_manager.list_book_sessions()
             result = []
             for s in sessions:
-                result.append({
-                    "book_id": s["book_id"],
-                    "book_title": s["book_title"],
-                    "message_count": s["message_count"],
-                    "last_active": s["last_active"],
-                    "is_active": s["book_id"] == self.session_manager.active_book_id,
-                })
+                result.append(
+                    {
+                        "book_id": s["book_id"],
+                        "book_title": s["book_title"],
+                        "message_count": s["message_count"],
+                        "last_active": s["last_active"],
+                        "is_active": s["book_id"]
+                        == self.session_manager.active_book_id,
+                    }
+                )
             return {"success": True, "sessions": result}
 
         @app.get("/api/memory/sessions/{book_id}")
@@ -548,14 +663,16 @@ class WebUIServer:
             sessions = self.session_manager.list_book_sessions()
             result = []
             for s in sessions:
-                result.append({
-                    "session_id": s["book_id"],
-                    "book_title": s["book_title"],
-                    "started_at": s["created_at"],
-                    "ended_at": s["last_active"],
-                    "message_count": s["message_count"],
-                    "preview": self._get_session_preview_by_id(s["book_id"]),
-                })
+                result.append(
+                    {
+                        "session_id": s["book_id"],
+                        "book_title": s["book_title"],
+                        "started_at": s["created_at"],
+                        "ended_at": s["last_active"],
+                        "message_count": s["message_count"],
+                        "preview": self._get_session_preview_by_id(s["book_id"]),
+                    }
+                )
             return {"success": True, "archives": result}
 
         @app.get("/api/memory/archives/{session_id}")
@@ -584,16 +701,21 @@ class WebUIServer:
         async def api_get_active_sessions():
             """Get currently active session info (legacy compatibility)."""
             sessions = []
-            if self.session_manager.active_book_id and self.session_manager.active_session:
+            if (
+                self.session_manager.active_book_id
+                and self.session_manager.active_session
+            ):
                 s = self.session_manager.active_session
-                sessions.append({
-                    "session_id": self.session_manager.active_book_id,
-                    "book_title": s.get("book_title", ""),
-                    "started_at": s.get("created_at"),
-                    "last_active": s.get("last_active"),
-                    "message_count": len(s.get("chat_history", [])),
-                    "preview": self._get_session_preview(s),
-                })
+                sessions.append(
+                    {
+                        "session_id": self.session_manager.active_book_id,
+                        "book_title": s.get("book_title", ""),
+                        "started_at": s.get("created_at"),
+                        "last_active": s.get("last_active"),
+                        "message_count": len(s.get("chat_history", [])),
+                        "preview": self._get_session_preview(s),
+                    }
+                )
             return {"success": True, "sessions": sessions}
 
         @app.delete("/api/memory/active/{session_id}/messages/{message_id}")
@@ -603,6 +725,598 @@ class WebUIServer:
             if not success:
                 raise HTTPException(404, detail="message not found")
             return {"success": True}
+
+        # --- Footprints APIs ---
+
+        @app.get("/api/footprints")
+        async def api_get_footprints():
+            """Get all footprint items (photos, user notes, bot notes)."""
+            profile = self._load_profile()
+            items = profile.get("footprints", [])
+            # sort by created_at descending
+            items.sort(key=lambda x: x.get("created_at", 0), reverse=True)
+            return {"success": True, "items": items}
+
+        @app.post("/api/footprints/upload")
+        async def api_upload_footprint(file: UploadFile = File(...)):
+            """Upload a photo to the footprints board."""
+            if not file.filename:
+                raise HTTPException(400, detail="no file provided")
+
+            # validate image type
+            allowed_ext = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp")
+            ext = Path(file.filename).suffix.lower()
+            if ext not in allowed_ext:
+                raise HTTPException(400, detail="unsupported image format")
+
+            file_bytes = await file.read()
+
+            # create directories
+            footprints_dir = self.assets_dir / "footprints"
+            originals_dir = footprints_dir / "originals"
+            thumbs_dir = footprints_dir / "thumbs"
+            originals_dir.mkdir(parents=True, exist_ok=True)
+            thumbs_dir.mkdir(parents=True, exist_ok=True)
+
+            # generate unique filename
+            item_id = uuid.uuid4().hex[:12]
+            filename = f"{item_id}.jpg"
+
+            # save original
+            original_path = originals_dir / filename
+            original_path.write_bytes(file_bytes)
+
+            # create thumbnail using Pillow
+            try:
+                import io
+
+                from PIL import Image
+
+                img = Image.open(io.BytesIO(file_bytes))
+                # convert to RGB if necessary (for PNG with alpha, etc.)
+                if img.mode in ("RGBA", "P"):
+                    img = img.convert("RGB")
+                # resize to max 300px width maintaining aspect ratio
+                max_width = 300
+                if img.width > max_width:
+                    ratio = max_width / img.width
+                    new_size = (max_width, int(img.height * ratio))
+                    img = img.resize(new_size, Image.LANCZOS)
+                # save thumbnail
+                thumb_path = thumbs_dir / filename
+                img.save(thumb_path, "JPEG", quality=85)
+            except Exception as e:
+                # if thumbnail creation fails, copy original as thumb
+                logger.warning(f"乌鲁鲁星: thumbnail creation failed: {e}")
+                thumb_path = thumbs_dir / filename
+                thumb_path.write_bytes(file_bytes)
+
+            # store metadata in profile
+            rotation = random.randint(-6, 6)
+            footprint_item = {
+                "id": item_id,
+                "type": "photo",
+                "filename": filename,
+                "caption": "",
+                "created_at": int(time.time()),
+                "rotation": rotation,
+            }
+
+            profile = self._load_profile()
+            footprints = profile.get("footprints", [])
+            footprints.append(footprint_item)
+            profile["footprints"] = footprints
+            self._save_profile(profile)
+
+            return {"success": True, "item": footprint_item}
+
+        @app.delete("/api/footprints/{item_id}")
+        async def api_delete_footprint(item_id: str):
+            """Delete a photo from the footprints board."""
+            profile = self._load_profile()
+            footprints = profile.get("footprints", [])
+
+            # find the item
+            item = None
+            for fp in footprints:
+                if fp.get("id") == item_id:
+                    item = fp
+                    break
+
+            if not item:
+                raise HTTPException(404, detail="footprint not found")
+
+            # remove files
+            footprints_dir = self.assets_dir / "footprints"
+            original_path = footprints_dir / "originals" / item["filename"]
+            thumb_path = footprints_dir / "thumbs" / item["filename"]
+            if original_path.exists():
+                original_path.unlink()
+            if thumb_path.exists():
+                thumb_path.unlink()
+
+            # remove from profile
+            footprints = [fp for fp in footprints if fp.get("id") != item_id]
+            profile["footprints"] = footprints
+            self._save_profile(profile)
+
+            return {"success": True}
+
+        @app.post("/api/footprints/note")
+        async def api_post_footprint_note(request: Request):
+            """Post a user note (sticky note). Bot will reply asynchronously."""
+            data = await request.json()
+            content = data.get("content", "").strip()
+            if not content:
+                raise HTTPException(400, detail="content is empty")
+
+            profile = self._load_profile()
+            notes = profile.get("fp_notes", [])
+
+            # Generate random position (percentage) avoiding overlap
+            pos_x = random.uniform(5, 75)
+            pos_y = random.uniform(5, 75)
+            # Try to avoid overlapping with existing notes
+            for _ in range(10):
+                overlap = False
+                for n in notes:
+                    nx = n.get("pos_x", 50)
+                    ny = n.get("pos_y", 50)
+                    if abs(nx - pos_x) < 15 and abs(ny - pos_y) < 15:
+                        overlap = True
+                        break
+                if not overlap:
+                    break
+                pos_x = random.uniform(5, 75)
+                pos_y = random.uniform(5, 75)
+
+            note_item = {
+                "id": f"note_{int(time.time())}_{random.randint(100, 999)}",
+                "content": content,
+                "created_at": int(time.time()),
+                "reply": None,
+                "reply_at": None,
+                "pos_x": round(pos_x, 1),
+                "pos_y": round(pos_y, 1),
+            }
+            notes.append(note_item)
+            profile["fp_notes"] = notes
+            self._save_profile(profile)
+
+            # trigger bot reply in background (delayed)
+            if self.bot_reader:
+                asyncio.create_task(self._generate_note_reply(note_item["id"], content))
+
+            return {"success": True, "item": note_item}
+
+        @app.get("/api/footprints/notes")
+        async def api_get_fp_notes():
+            """Get all sticky notes with bot replies."""
+            profile = self._load_profile()
+            notes = profile.get("fp_notes", [])
+            # Assign random positions to legacy notes missing pos_x/pos_y
+            changed = False
+            for n in notes:
+                if "pos_x" not in n or "pos_y" not in n:
+                    n["pos_x"] = round(random.uniform(5, 75), 1)
+                    n["pos_y"] = round(random.uniform(5, 75), 1)
+                    changed = True
+            if changed:
+                profile["fp_notes"] = notes
+                self._save_profile(profile)
+            # sort newest first
+            notes.sort(key=lambda x: x.get("created_at", 0), reverse=True)
+            return {"success": True, "notes": notes}
+
+        @app.post("/api/footprints/notes/{note_id}/position")
+        async def api_update_note_position(note_id: str, request: Request):
+            """Update a sticky note's position after drag."""
+            data = await request.json()
+            pos_x = data.get("pos_x")
+            pos_y = data.get("pos_y")
+            if pos_x is None or pos_y is None:
+                raise HTTPException(400, detail="pos_x and pos_y are required")
+
+            # Clamp values to valid range
+            pos_x = max(0, min(95, float(pos_x)))
+            pos_y = max(0, min(95, float(pos_y)))
+
+            profile = self._load_profile()
+            notes = profile.get("fp_notes", [])
+            found = False
+            for n in notes:
+                if n.get("id") == note_id:
+                    n["pos_x"] = round(pos_x, 1)
+                    n["pos_y"] = round(pos_y, 1)
+                    found = True
+                    break
+            if not found:
+                raise HTTPException(404, detail="note not found")
+
+            profile["fp_notes"] = notes
+            self._save_profile(profile)
+            return {"success": True}
+
+        @app.delete("/api/footprints/notes/{note_id}")
+        async def api_delete_fp_note(note_id: str):
+            """Delete a sticky note (and its bot reply)."""
+            profile = self._load_profile()
+            notes = profile.get("fp_notes", [])
+            notes = [n for n in notes if n.get("id") != note_id]
+            profile["fp_notes"] = notes
+            self._save_profile(profile)
+            return {"success": True}
+
+        @app.get("/api/footprints/moments")
+        async def api_get_moments():
+            """Get bot moments (dynamics)."""
+            profile = self._load_profile()
+            footprints = profile.get("footprints", [])
+            moments = [fp for fp in footprints if fp.get("type") == "bot_note"]
+            moments.sort(key=lambda x: x.get("created_at", 0), reverse=True)
+            return {"success": True, "moments": moments}
+
+        @app.post("/api/footprints/moments/{moment_id}/like")
+        async def api_like_moment(moment_id: str):
+            """Toggle like on a bot moment."""
+            profile = self._load_profile()
+            footprints = profile.get("footprints", [])
+            for fp in footprints:
+                if fp.get("id") == moment_id:
+                    fp["liked"] = not fp.get("liked", False)
+                    fp["like_count"] = fp.get("like_count", 0) + (
+                        1 if fp["liked"] else -1
+                    )
+                    if fp["like_count"] < 0:
+                        fp["like_count"] = 0
+                    break
+            profile["footprints"] = footprints
+            self._save_profile(profile)
+            return {"success": True}
+
+        @app.post("/api/footprints/moments/{moment_id}/reply")
+        async def api_reply_moment(moment_id: str, request: Request):
+            """Reply to a bot moment. Bot will reply back asynchronously."""
+            data = await request.json()
+            content = data.get("content", "").strip()
+            if not content:
+                raise HTTPException(400, detail="content is empty")
+
+            profile = self._load_profile()
+            footprints = profile.get("footprints", [])
+            for fp in footprints:
+                if fp.get("id") == moment_id:
+                    if "replies" not in fp:
+                        fp["replies"] = []
+                    fp["replies"].append(
+                        {
+                            "role": "user",
+                            "content": content,
+                            "time": int(time.time()),
+                        }
+                    )
+                    # trigger bot reply in background
+                    if self.bot_reader:
+                        asyncio.create_task(
+                            self._generate_moment_reply(
+                                moment_id, fp.get("content", ""), content
+                            )
+                        )
+                    break
+            profile["footprints"] = footprints
+            self._save_profile(profile)
+            return {"success": True}
+
+        # --- Pet House APIs ---
+
+        @app.get("/api/pets")
+        async def api_list_pets():
+            """List all pets with time-based decay applied."""
+            if not self.plugin or not getattr(self.plugin, "pet_house_manager", None):
+                raise HTTPException(500, detail="pet house not available")
+            mgr = self.plugin.pet_house_manager
+            pets = await mgr.list_pets()
+
+            pets_data = []
+            for p in pets:
+                d = asdict(p)
+                d["animation_state"] = mgr.get_animation_state(p)
+                # Normalize customization_data for compatibility fallbacks
+                d["customization_data"] = mgr.normalize_customization_data(
+                    p.species, p.customization_data
+                )
+                pets_data.append(d)
+
+            return {"success": True, "pets": pets_data}
+
+        @app.post("/api/pets")
+        async def api_create_pet(request: Request):
+            """Create a new pet with name and species."""
+            if not self.plugin or not getattr(self.plugin, "pet_house_manager", None):
+                raise HTTPException(500, detail="pet house not available")
+
+            data = await request.json()
+            name = data.get("name", "")
+            species = data.get("species", "")
+
+            if not name or not name.strip():
+                raise HTTPException(400, detail="name is required")
+            if not species:
+                raise HTTPException(400, detail="species is required")
+
+            try:
+                pet = await self.plugin.pet_house_manager.create_pet(name, species)
+            except ValueError as e:
+                raise HTTPException(400, detail=str(e))
+
+            pet_data = asdict(pet)
+            pet_data["animation_state"] = (
+                self.plugin.pet_house_manager.get_animation_state(pet)
+            )
+            return {"success": True, "pet": pet_data}
+
+        @app.put("/api/pets/{pet_id}")
+        async def api_update_pet(pet_id: str, request: Request):
+            """Update a pet's name."""
+            if not self.plugin or not getattr(self.plugin, "pet_house_manager", None):
+                raise HTTPException(500, detail="pet house not available")
+
+            data = await request.json()
+            new_name = data.get("name", "")
+
+            if not new_name or not new_name.strip():
+                raise HTTPException(400, detail="name is required")
+
+            try:
+                pet = await self.plugin.pet_house_manager.update_pet_name(
+                    pet_id, new_name
+                )
+            except KeyError:
+                raise HTTPException(404, detail="pet not found")
+            except ValueError as e:
+                raise HTTPException(400, detail=str(e))
+
+            pet_data = asdict(pet)
+            pet_data["animation_state"] = (
+                self.plugin.pet_house_manager.get_animation_state(pet)
+            )
+            return {"success": True, "pet": pet_data}
+
+        @app.delete("/api/pets/{pet_id}")
+        async def api_delete_pet(pet_id: str):
+            """Delete a pet by ID."""
+            if not self.plugin or not getattr(self.plugin, "pet_house_manager", None):
+                raise HTTPException(500, detail="pet house not available")
+
+            try:
+                await self.plugin.pet_house_manager.delete_pet(pet_id)
+            except KeyError:
+                raise HTTPException(404, detail="pet not found")
+
+            return {"success": True}
+
+        @app.post("/api/pets/{pet_id}/feed")
+        async def api_feed_pet(pet_id: str):
+            """Feed a pet, restoring hunger to 100."""
+            if not self.plugin or not getattr(self.plugin, "pet_house_manager", None):
+                raise HTTPException(500, detail="pet house not available")
+
+            try:
+                pet, comment = await self.plugin.pet_house_manager.feed_pet(pet_id)
+            except KeyError:
+                raise HTTPException(404, detail="pet not found")
+
+            pet_data = asdict(pet)
+            pet_data["animation_state"] = (
+                self.plugin.pet_house_manager.get_animation_state(pet)
+            )
+            return {"success": True, "pet": pet_data, "comment": comment}
+
+        @app.post("/api/pets/{pet_id}/pet")
+        async def api_pet_pet(pet_id: str):
+            """Pet (摸摸) a pet, increasing mood."""
+            if not self.plugin or not getattr(self.plugin, "pet_house_manager", None):
+                raise HTTPException(500, detail="pet house not available")
+
+            try:
+                pet, comment = await self.plugin.pet_house_manager.pet_pet(pet_id)
+            except KeyError:
+                raise HTTPException(404, detail="pet not found")
+
+            pet_data = asdict(pet)
+            pet_data["animation_state"] = (
+                self.plugin.pet_house_manager.get_animation_state(pet)
+            )
+            return {"success": True, "pet": pet_data, "comment": comment}
+
+        @app.get("/api/pets/{pet_id}/photo")
+        async def api_get_pet_photo(pet_id: str):
+            """Serve a pet's ID photo file."""
+            if not self.plugin or not getattr(self.plugin, "pet_house_manager", None):
+                raise HTTPException(500, detail="pet house not available")
+
+            mgr = self.plugin.pet_house_manager
+            pet = mgr._pets.get(pet_id)
+            if not pet:
+                raise HTTPException(404, detail="pet not found")
+
+            if not pet.photo_filename:
+                raise HTTPException(404, detail="no photo uploaded")
+
+            photo_path = mgr._data_dir / pet.photo_filename
+            if not photo_path.exists():
+                raise HTTPException(404, detail="photo file not found")
+
+            return FileResponse(str(photo_path))
+
+        @app.post("/api/pets/{pet_id}/photo")
+        async def api_upload_pet_photo(pet_id: str, file: UploadFile = File(...)):
+            """Upload an ID photo for a pet (multipart file upload)."""
+            if not self.plugin or not getattr(self.plugin, "pet_house_manager", None):
+                raise HTTPException(500, detail="pet house not available")
+
+            if not file.filename:
+                raise HTTPException(400, detail="no file provided")
+
+            ext = Path(file.filename).suffix.lower()
+            if ext not in (".jpg", ".jpeg", ".png", ".gif", ".webp"):
+                raise HTTPException(400, detail="unsupported image format")
+
+            photo_bytes = await file.read()
+
+            try:
+                filename = await self.plugin.pet_house_manager.upload_photo(
+                    pet_id, photo_bytes, ext
+                )
+            except KeyError:
+                raise HTTPException(404, detail="pet not found")
+            except ValueError as e:
+                raise HTTPException(400, detail=str(e))
+
+            return {"success": True, "filename": filename}
+
+        # --- Pet Customization APIs ---
+
+        @app.get("/api/pets/{pet_id}/customization")
+        async def api_get_pet_customization(pet_id: str):
+            """Get a pet's customization data, normalized for compatibility.
+
+            If the pet has no customization_data (legacy pet), returns the
+            species default. If stored data references deleted templates,
+            colors, patterns, or accessories, they are replaced with safe
+            fallback values before returning.
+            """
+            if not self.plugin or not getattr(self.plugin, "pet_house_manager", None):
+                raise HTTPException(500, detail="pet house not available")
+
+            mgr = self.plugin.pet_house_manager
+            pet = await mgr.get_pet(pet_id)
+            if pet is None:
+                raise HTTPException(404, detail="pet not found")
+
+            # Normalize handles None (legacy) and invalid values (deleted items)
+            customization = mgr.normalize_customization_data(
+                pet.species, pet.customization_data
+            )
+
+            return {"success": True, "customization_data": customization}
+
+        @app.put("/api/pets/{pet_id}/customization")
+        async def api_update_pet_customization(pet_id: str, request: Request):
+            """Validate and update a pet's customization data."""
+            if not self.plugin or not getattr(self.plugin, "pet_house_manager", None):
+                raise HTTPException(500, detail="pet house not available")
+
+            mgr = self.plugin.pet_house_manager
+
+            # Look up the pet (without applying decay for a simple existence check)
+            async with mgr._lock:
+                pet = mgr._pets.get(pet_id)
+                if pet is None:
+                    raise HTTPException(404, detail="pet not found")
+
+                # Parse and validate request body
+                data = await request.json()
+                error = mgr.validate_customization_data(pet.species, data)
+                if error is not None:
+                    raise HTTPException(400, detail=error)
+
+                # Update customization_data and persist
+                pet.customization_data = data
+                await mgr._save()
+
+            # Build response with animation state
+            pet_data = asdict(pet)
+            pet_data["animation_state"] = mgr.get_animation_state(pet)
+            return {"success": True, "pet": pet_data}
+
+    async def _generate_note_reply(self, note_id: str, user_content: str):
+        """Generate a bot reply to a user's sticky note (async, delayed)."""
+        try:
+            # small delay to simulate "thinking"
+            await asyncio.sleep(random.uniform(3, 8))
+
+            if not self.plugin or not hasattr(self.plugin, "context"):
+                return
+
+            provider = self.plugin.context.get_using_provider()
+            if not provider:
+                return
+
+            prompt = (
+                f"她在便签板上给你留了一张纸条：「{user_content}」\n"
+                "请用一两句话回复她，写在另一张便签纸上。"
+                "风格要求：简短、温柔、自然，像随手写的回复。不要超过30个字。"
+                "直接输出回复内容，不要加引号或前缀。"
+            )
+
+            resp = await provider.text_chat(prompt=prompt, system_prompt="")
+            reply_text = (resp.completion_text or "").strip()
+            if not reply_text or len(reply_text) > 80:
+                return
+
+            # save reply to the note
+            profile = self._load_profile()
+            notes = profile.get("fp_notes", [])
+            for note in notes:
+                if note.get("id") == note_id:
+                    note["reply"] = reply_text
+                    note["reply_at"] = int(time.time())
+                    break
+            profile["fp_notes"] = notes
+            self._save_profile(profile)
+
+            logger.info(f"乌鲁鲁星: 便签回复已生成: {reply_text[:20]}...")
+        except Exception as e:
+            logger.debug(f"乌鲁鲁星: 便签回复生成失败: {e}")
+
+    async def _generate_moment_reply(
+        self, moment_id: str, moment_content: str, user_reply: str
+    ):
+        """Generate a bot reply to user's comment on a moment (async, delayed)."""
+        try:
+            await asyncio.sleep(random.uniform(3, 8))
+
+            if not self.plugin or not hasattr(self.plugin, "context"):
+                return
+
+            provider = self.plugin.context.get_using_provider()
+            if not provider:
+                return
+
+            prompt = (
+                f"你之前发了一条动态：「{moment_content}」\n"
+                f"她回复了你：「{user_reply}」\n"
+                "请用一句话回复她的评论。简短、自然、像朋友圈回复。不要超过20个字。"
+                "直接输出回复内容。"
+            )
+
+            resp = await provider.text_chat(prompt=prompt, system_prompt="")
+            reply_text = (resp.completion_text or "").strip()
+            if not reply_text or len(reply_text) > 60:
+                return
+
+            # save reply
+            profile = self._load_profile()
+            footprints = profile.get("footprints", [])
+            for fp in footprints:
+                if fp.get("id") == moment_id:
+                    if "replies" not in fp:
+                        fp["replies"] = []
+                    fp["replies"].append(
+                        {
+                            "role": "bot",
+                            "content": reply_text,
+                            "time": int(time.time()),
+                        }
+                    )
+                    break
+            profile["footprints"] = footprints
+            self._save_profile(profile)
+
+            logger.info(f"乌鲁鲁星: 动态回复已生成: {reply_text[:20]}...")
+        except Exception as e:
+            logger.debug(f"乌鲁鲁星: 动态回复生成失败: {e}")
 
     def _get_session_preview_by_id(self, book_id: str) -> str:
         """Get a short preview of a book session's content."""

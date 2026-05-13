@@ -89,6 +89,31 @@
         "type": "int",
         "hint": "用户最近 N 分钟内有消息活动时，不发送主动消息，避免打断聊天",
         "default": 5
+      },
+      "dynamics_interval_min": {
+        "description": "动态发送间隔下限（小时）",
+        "type": "int",
+        "hint": "两条动态之间的最短等待时间（小时）",
+        "default": 4
+      },
+      "dynamics_interval_max": {
+        "description": "动态发送间隔上限（小时）",
+        "type": "int",
+        "hint": "两条动态之间的最长等待时间（小时）",
+        "default": 8
+      }
+    }
+  },
+  "pet_house": {
+    "description": "宠物屋",
+    "type": "object",
+    "hint": "像素小宠物功能。关闭后前端不显示宠物屋模块。",
+    "items": {
+      "enabled": {
+        "description": "启用宠物屋",
+        "type": "bool",
+        "hint": "是否启用宠物屋功能（投喂、摸摸、捏宠物等）",
+        "default": true
       }
     }
   },

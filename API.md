@@ -1,213 +1,388 @@
-# 乌鲁鲁星 - 后端 API 文档
+# Uluru Star — API Reference
 
-Base URL: `http://{host}:{port}` (默认 `http://localhost:1016`)
+Base URL: `http://{host}:{port}` (default `http://localhost:1016`)
 
-## 页面路由
+All JSON endpoints return `{"success": true, ...}` on success.
+Error responses use HTTP status codes (400, 404, 500) with `{"detail": "error message"}`.
 
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| GET | `/` | 主页 HTML |
-| GET | `/style.css` | 样式表 |
-| GET | `/app.js` | 前端脚本 |
-| GET | `/sw.js` | Service Worker |
-| GET | `/static/{filename}` | 静态资源（templates 目录） |
-| GET | `/assets/{filename}` | 用户资源（plugin_data/assets 目录） |
+---
 
-## 配置 API
+## Page Routes
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/` | Main SPA HTML page |
+| GET | `/style.css` | Stylesheet |
+| GET | `/app.js` | Main frontend script |
+| GET | `/sw.js` | Service Worker (PWA offline cache) |
+| GET | `/static/{filename}` | Static assets from templates directory |
+| GET | `/custom-static/{filename}` | Custom template overrides (if directory exists) |
+| GET | `/assets/{path}` | User-uploaded assets (photos, thumbnails) |
+
+---
+
+## Configuration
 
 ### GET /api/config/frontend
-返回前端需要的配置值。
 
-**响应：**
+Returns frontend-relevant configuration values.
+
+**Response:**
 ```json
 {
   "success": true,
-  "message_separator": "\\$"
+  "message_separator": "\\$",
+  "pet_house_enabled": true
 }
 ```
 
-## Profile API
+---
+
+## Profile
 
 ### GET /api/profile
-获取持久化的用户数据。
 
-**响应：**
+Get stored user profile data (avatars, nicknames, covers, theme, particles, notes).
+
+**Response:**
 ```json
 {
   "success": true,
   "profile": {
     "user_nickname": "你",
     "bot_nickname": "沈星回",
-    "user_avatar": "data:image/...",
-    "bot_avatar": "data:image/...",
+    "user_avatar": "data:image/png;base64,...",
+    "bot_avatar": "data:image/png;base64,...",
     "theme": "blue",
     "particles": {"enabled": true, "shape": "heart", "color": "theme"},
-    "covers": {"book_id": "data:image/..."},
-    "note_box": [{"content": "...", "time": 1778000000}]
+    "covers": {"book_id_here": "data:image/..."},
+    "note_box": [{"content": "...", "time": 1700000000000}],
+    "footprints": [...],
+    "fp_notes": [...]
   }
 }
 ```
 
 ### POST /api/profile
-保存用户数据（合并更新）。
 
-**请求体：** 任意 key-value，会合并到现有 profile 中。
+Save profile data (merge update — only provided keys are updated).
 
-## Session API
+**Request Body:** Any key-value pairs to merge into the profile.
+
+```json
+{"user_nickname": "新昵称", "theme": "pink"}
+```
+
+**Response:** `{"success": true}`
+
+---
+
+## Sessions
 
 ### POST /api/session/start
-开始或恢复书籍会话。
 
-**请求体：**
+Start or resume a book reading session.
+
+**Request Body:**
 ```json
 {"book_id": "abc123", "book_title": "书名"}
 ```
 
-### POST /api/session/heartbeat
-心跳保活。
+If `book_id` is omitted, acknowledges connection without creating a session.
 
-**请求体：** `{"book_id": "abc123"}`
+**Response:**
+```json
+{
+  "success": true,
+  "session_active": true,
+  "book_id": "abc123",
+  "resumed": false,
+  "message_count": 12
+}
+```
+
+### POST /api/session/heartbeat
+
+Keep session alive.
+
+**Request Body:** `{"book_id": "abc123"}`
+
+**Response:** `{"success": true}` or `{"success": false}`
 
 ### POST /api/session/end
-结束会话。
 
-**请求体：** `{"book_id": "abc123"}`
+End the current session.
 
-## 书籍 API
+**Request Body:** `{"book_id": "abc123"}`
+
+**Response:** `{"success": true}`
+
+---
+
+## Books
 
 ### GET /api/books
-获取书架列表。
 
-**响应：**
+List all books on the shelf.
+
+**Response:**
 ```json
 {
   "success": true,
   "books": [
-    {"id": "abc123", "title": "书名", "author": "作者", "chapter_count": 30, "added_at": 1778000000}
+    {
+      "id": "abc123",
+      "title": "书名",
+      "author": "作者",
+      "chapter_count": 30,
+      "added_at": 1700000000
+    }
   ]
 }
 ```
 
 ### POST /api/books/upload
-上传 epub 或 txt 文件。
 
-**请求：** multipart/form-data, field: `file`
+Upload an epub or txt file.
+
+**Request:** `multipart/form-data` with field `file`
+
+**Constraints:** Only `.epub` and `.txt` files accepted.
+
+**Response:**
+```json
+{"success": true, "book": {"id": "abc123", "title": "...", ...}}
+```
 
 ### GET /api/books/{book_id}/chapters
-获取章节目录。
 
-**响应：**
+Get chapter list for a book.
+
+**Response:**
 ```json
 {
   "success": true,
   "chapters": [
-    {"index": 0, "title": "第一章", "text_preview": "..."}
+    {"index": 0, "title": "第一章 开始"}
   ]
 }
 ```
 
 ### GET /api/books/{book_id}/chapters/{chapter_index}
-获取章节 HTML 内容。
 
-**响应：** `{"success": true, "content": "<p>...</p>"}`
+Get chapter HTML content.
+
+**Response:** `{"success": true, "content": "<p>Chapter text...</p>"}`
 
 ### DELETE /api/books/{book_id}
-删除书籍。
 
-## 交互 API
+Delete a book and all associated data.
+
+**Response:** `{"success": true}`
+
+---
+
+## Interactions
 
 ### POST /api/interact/highlight
-记录划线（存入 library + 对话历史）。
 
-**请求体：**
+Record a text highlight. Also saves a system note in chat history.
+
+**Request Body:**
 ```json
 {
   "session_token": "local",
   "book_id": "abc123",
   "chapter_index": 5,
-  "text": "划线的文字",
-  "context": "上下文"
+  "text": "highlighted text",
+  "context": "surrounding context text"
 }
 ```
 
+**Response:**
+```json
+{"success": true, "highlight": {"text": "...", "chapter_index": 5, ...}}
+```
+
 ### POST /api/interact/review
-提交书评（触发 Bot 回复）。
+
+Submit a book review. Triggers bot reply via LLM.
+
+**Request Body:**
+```json
+{
+  "session_token": "local",
+  "book_id": "abc123",
+  "chapter_index": 5,
+  "content": "review text"
+}
+```
+
+**Response:**
+```json
+{"success": true, "review": {...}, "bot_reply": "Bot's response"}
+```
 
 ### POST /api/interact/note
-提交纸条（触发 Bot 回复）。
 
-## 聊天 API
+Submit a reading note. Triggers bot reply via LLM.
+
+**Request Body:**
+```json
+{
+  "session_token": "local",
+  "book_id": "abc123",
+  "chapter_index": 5,
+  "content": "note text"
+}
+```
+
+**Response:**
+```json
+{"success": true, "note": {...}, "bot_reply": "Bot's response"}
+```
+
+---
+
+## Chat
 
 ### GET /api/chat/history?book_id={book_id}
-获取某本书的聊天记录。
 
-**响应：**
+Get chat history for a specific book.
+
+**Response:**
 ```json
 {
   "success": true,
   "messages": [
-    {"id": "abc", "role": "user", "content": "...", "timestamp": 1778000000, "metadata": {}}
+    {
+      "id": "msg_001",
+      "role": "user",
+      "content": "message text",
+      "timestamp": 1700000000,
+      "metadata": {"type": "highlight", "silent": true}
+    }
   ]
 }
 ```
 
 ### POST /api/chat/send
-发送聊天消息。
 
-**请求体：**
+Send a chat message and get bot reply.
+
+**Request Body:**
 ```json
 {
   "book_id": "abc123",
-  "content": "消息内容",
+  "content": "message text",
   "chapter_index": 5,
   "scroll_percent": 45,
   "bookmark_percent": 20
 }
 ```
 
-**响应：** `{"success": true, "reply": "Bot 的回复"}`
+- `scroll_percent` (0-100): Current scroll position in the chapter
+- `bookmark_percent` (0-100, optional): Bookmark position for reading window
 
-**滑动窗口逻辑：**
-- `scroll_percent`: 用户当前滚动位置（0-100）
-- `bookmark_percent`: 书签位置（可选）
-- 短章节全量注入，长章节截取窗口（最大 3000 字）
+**Response:** `{"success": true, "reply": "Bot's response text"}`
 
-## 打卡 API
+**Sliding Window Logic:**
+- Short chapters (≤3000 chars): full text injected into LLM context
+- Long chapters: 2000-char window centered on scroll position
+- With bookmark: window spans from bookmark to scroll position
+- Maximum injection: 3000 chars
+
+---
+
+## Chapter Completion
 
 ### POST /api/chapter/complete
-章节打卡，触发 Bot 生成章节记忆。
 
-**请求体：**
+Mark a chapter as complete (打卡). Advances user progress and triggers bot memory generation.
+
+**Request Body:**
 ```json
 {"book_id": "abc123", "chapter_index": 5}
 ```
 
-**响应：** `{"success": true, "message": "打卡成功"}`
+**Response:** `{"success": true, "message": "打卡成功"}`
 
-**副作用：** 后台异步调用 LLM 生成章节摘要，存入 `bot_chapter_memories.json`。
+**Side Effects:**
+- Records chapter in user's checked_chapters_list
+- Triggers async LLM call to generate chapter memory summary
 
-## 进度 API
+---
+
+## Reading Progress
 
 ### GET /api/bot-progress/{book_id}
-获取 Bot 阅读进度百分比。
+
+Get bot's reading progress percentage for a book.
+
+**Response:** `{"success": true, "percent": 45}`
+
+Note: Progress is based on completed chapters (those with generated memories).
 
 ### POST /api/user-progress/report
-上报用户阅读进度。
 
-**请求体：**
+Report user's reading progress when opening a chapter.
+
+**Request Body:**
 ```json
-{"book_id": "abc123", "chapter_index": 5, "total_chapters": 30, "book_title": "书名"}
+{
+  "book_id": "abc123",
+  "chapter_index": 5,
+  "total_chapters": 30,
+  "book_title": "书名"
+}
 ```
 
-### GET /api/user-progress/{book_id}
-获取用户阅读进度百分比。
+**Response:** `{"success": true}`
 
-## 统计 API
+Note: Uses high-water-mark mode — progress never goes backwards.
+
+### GET /api/user-progress/{book_id}
+
+Get user's reading progress percentage.
+
+**Response:** `{"success": true, "percent": 20}`
+
+### GET /api/reading-progress
+
+Get bot and user reading progress for all books.
+
+**Response:**
+```json
+{
+  "success": true,
+  "bot_progress": [
+    {
+      "book_title": "书名",
+      "current_chapter": 10,
+      "total_chapters": 30,
+      "percentage": 33.3
+    }
+  ],
+  "user_progress": [
+    {
+      "book_title": "书名",
+      "current_chapter": 5,
+      "total_chapters": 30,
+      "percentage": 16.7
+    }
+  ]
+}
+```
+
+---
+
+## Statistics
 
 ### GET /api/stats
-获取阅读统计数据。
 
-**响应：**
+Get aggregate reading statistics.
+
+**Response:**
 ```json
 {
   "success": true,
@@ -223,31 +398,497 @@ Base URL: `http://{host}:{port}` (默认 `http://localhost:1016`)
 }
 ```
 
-## 记忆管理 API
+---
 
-### GET /api/memory/sessions
-列出所有书籍会话。
+## Bot Memories
 
-### GET /api/memory/sessions/{book_id}
-获取某本书的完整会话详情。
+### GET /api/bot-memories
 
-### DELETE /api/memory/sessions/{book_id}
-删除某本书的会话。
+Get all bot chapter memory summaries.
 
-### DELETE /api/memory/sessions/{book_id}/messages/{message_id}
-删除单条消息。
+**Response:**
+```json
+{
+  "success": true,
+  "memories": [
+    {
+      "book_id": "abc123",
+      "book_title": "书名",
+      "chapter_index": 3,
+      "summary": "150-200 char summary from bot's perspective..."
+    }
+  ]
+}
+```
 
-## Legacy API（兼容旧版）
+---
 
-### GET /api/memory/archives
-### GET /api/memory/archives/{session_id}
-### DELETE /api/memory/archives/{session_id}
-### DELETE /api/memory/archives/{session_id}/messages/{message_id}
-### GET /api/memory/active
-### DELETE /api/memory/active/{session_id}/messages/{message_id}
-
-## 数据查询 API
+## Data Queries
 
 ### GET /api/data/{book_id}/highlights
+
+Get all highlights for a book.
+
+**Response:** `{"success": true, "highlights": [...]}`
+
+### DELETE /api/data/{book_id}/highlights
+
+Delete a highlight by text match.
+
+**Request Body:**
+```json
+{"text": "highlighted text", "chapter_index": 5}
+```
+
+**Response:** `{"success": true}`
+
 ### GET /api/data/{book_id}/reviews
+
+Get all reviews for a book.
+
+**Response:** `{"success": true, "reviews": [...]}`
+
 ### GET /api/data/{book_id}/notes
+
+Get all notes for a book.
+
+**Response:** `{"success": true, "notes": [...]}`
+
+---
+
+## Memory Management
+
+### GET /api/memory/sessions
+
+List all book sessions with metadata.
+
+**Response:**
+```json
+{
+  "success": true,
+  "sessions": [
+    {
+      "book_id": "abc123",
+      "book_title": "书名",
+      "message_count": 25,
+      "last_active": 1700000000,
+      "is_active": true
+    }
+  ]
+}
+```
+
+### GET /api/memory/sessions/{book_id}
+
+Get full chat history of a book session.
+
+**Response:**
+```json
+{
+  "success": true,
+  "session": {
+    "book_id": "abc123",
+    "book_title": "书名",
+    "chat_history": [
+      {"id": "msg_001", "role": "user", "content": "...", "timestamp": 1700000000}
+    ]
+  }
+}
+```
+
+### DELETE /api/memory/sessions/{book_id}
+
+Delete a book session entirely.
+
+**Response:** `{"success": true}`
+
+### DELETE /api/memory/sessions/{book_id}/messages/{message_id}
+
+Delete a single message from a session.
+
+**Response:** `{"success": true}`
+
+---
+
+## Legacy Memory Endpoints (Backward Compatibility)
+
+These endpoints mirror the session endpoints above with different naming:
+
+| Method | Path | Maps To |
+|--------|------|---------|
+| GET | `/api/memory/archives` | List sessions (with legacy field names) |
+| GET | `/api/memory/archives/{session_id}` | Get session detail |
+| DELETE | `/api/memory/archives/{session_id}` | Delete session |
+| DELETE | `/api/memory/archives/{session_id}/messages/{message_id}` | Delete message |
+| GET | `/api/memory/active` | Get currently active session |
+| DELETE | `/api/memory/active/{session_id}/messages/{message_id}` | Delete active message |
+
+---
+
+## Footprints
+
+### GET /api/footprints
+
+Get all footprint items (photos, bot notes).
+
+**Response:**
+```json
+{
+  "success": true,
+  "items": [
+    {
+      "id": "abc123def456",
+      "type": "photo",
+      "filename": "abc123def456.jpg",
+      "caption": "",
+      "created_at": 1700000000,
+      "rotation": -3
+    },
+    {
+      "id": "bot_1700000000_123",
+      "type": "bot_note",
+      "content": "Bot's casual thought...",
+      "created_at": 1700000000,
+      "rotation": 2
+    }
+  ]
+}
+```
+
+### POST /api/footprints/upload
+
+Upload a photo to the footprints board.
+
+**Request:** `multipart/form-data` with field `file`
+
+**Accepted formats:** .jpg, .jpeg, .png, .gif, .webp, .bmp
+
+**Response:**
+```json
+{
+  "success": true,
+  "item": {
+    "id": "abc123def456",
+    "type": "photo",
+    "filename": "abc123def456.jpg",
+    "caption": "",
+    "created_at": 1700000000,
+    "rotation": 2
+  }
+}
+```
+
+**Side Effects:** Creates original + 300px-wide JPEG thumbnail in assets/footprints/.
+
+### DELETE /api/footprints/{item_id}
+
+Delete a photo from the footprints board (removes files and metadata).
+
+**Response:** `{"success": true}`
+
+### POST /api/footprints/note
+
+Post a user sticky note. Bot will reply asynchronously (3-8s delay).
+
+**Request Body:**
+```json
+{"content": "note text"}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "item": {
+    "id": "note_1700000000_123",
+    "content": "note text",
+    "created_at": 1700000000,
+    "reply": null,
+    "reply_at": null
+  }
+}
+```
+
+### GET /api/footprints/notes
+
+Get all sticky notes with bot replies.
+
+**Response:**
+```json
+{
+  "success": true,
+  "notes": [
+    {
+      "id": "note_1700000000_123",
+      "content": "user note text",
+      "created_at": 1700000000,
+      "reply": "bot reply text",
+      "reply_at": 1700000005
+    }
+  ]
+}
+```
+
+### DELETE /api/footprints/notes/{note_id}
+
+Delete a sticky note and its bot reply.
+
+**Response:** `{"success": true}`
+
+### GET /api/footprints/moments
+
+Get bot moments (dynamics/status updates).
+
+**Response:**
+```json
+{
+  "success": true,
+  "moments": [
+    {
+      "id": "bot_1700000000_123",
+      "type": "bot_note",
+      "content": "Bot's casual thought",
+      "created_at": 1700000000,
+      "rotation": 2,
+      "liked": false,
+      "like_count": 0,
+      "replies": []
+    }
+  ]
+}
+```
+
+### POST /api/footprints/moments/{moment_id}/like
+
+Toggle like on a bot moment.
+
+**Response:** `{"success": true}`
+
+### POST /api/footprints/moments/{moment_id}/reply
+
+Reply to a bot moment. Bot will reply back asynchronously.
+
+**Request Body:** `{"content": "reply text"}`
+
+**Response:** `{"success": true}`
+
+---
+
+## Pet House
+
+All pet house endpoints check `getattr(self.plugin, "pet_house_manager", None)` and return HTTP 500 if the pet house feature is disabled.
+
+### GET /api/pets
+
+List all pets with time-based decay applied.
+
+**Response:**
+```json
+{
+  "success": true,
+  "pets": [
+    {
+      "id": "a1b2c3d4e5f6",
+      "name": "小橘",
+      "species": "cat",
+      "hunger": 85,
+      "mood": 72,
+      "last_updated": 1700000000.0,
+      "created_at": 1699000000.0,
+      "photo_filename": "a1b2c3d4e5f6_photo.jpg",
+      "notified": false,
+      "customization_data": {
+        "template_id": "pointy-ear-cat",
+        "primary_color": "orange",
+        "secondary_color": "cream",
+        "pattern": "solid",
+        "accessory": null
+      },
+      "animation_state": "happy"
+    }
+  ]
+}
+```
+
+**Animation States:** `idle`, `happy`, `hungry`, `sad`
+
+**Species:** `cat`, `dog`, `rabbit`, `hamster`
+
+### POST /api/pets
+
+Create a new pet.
+
+**Request Body:**
+```json
+{"name": "小橘", "species": "cat"}
+```
+
+**Validation:**
+- `name`: non-empty after trimming
+- `species`: one of `cat`, `dog`, `rabbit`, `hamster`
+
+**Response:**
+```json
+{"success": true, "pet": {...}}
+```
+
+### PUT /api/pets/{pet_id}
+
+Update a pet's name.
+
+**Request Body:** `{"name": "新名字"}`
+
+**Response:** `{"success": true, "pet": {...}}`
+
+### DELETE /api/pets/{pet_id}
+
+Delete a pet (also removes photo file if exists).
+
+**Response:** `{"success": true}`
+
+### POST /api/pets/{pet_id}/feed
+
+Feed a pet (restores hunger to 100).
+
+**Response:**
+```json
+{
+  "success": true,
+  "pet": {...},
+  "comment": "它吃得比我还香"
+}
+```
+
+The `comment` field contains a random easter egg comment from the bot character.
+
+### POST /api/pets/{pet_id}/pet
+
+Pet (摸摸) a pet (increases mood by 5-15).
+
+**Response:**
+```json
+{
+  "success": true,
+  "pet": {...},
+  "comment": "手感好吗"
+}
+```
+
+### GET /api/pets/{pet_id}/photo
+
+Serve a pet's ID photo file.
+
+**Response:** Image file (FileResponse)
+
+### POST /api/pets/{pet_id}/photo
+
+Upload an ID photo for a pet.
+
+**Request:** `multipart/form-data` with field `file`
+
+**Accepted formats:** .jpg, .jpeg, .png, .gif, .webp
+
+**Size limit:** 5MB
+
+**Response:** `{"success": true, "filename": "a1b2c3d4e5f6_photo.jpg"}`
+
+---
+
+## Pet Customization
+
+### GET /api/pets/{pet_id}/customization
+
+Get a pet's customization data, normalized for compatibility.
+
+Legacy pets (no customization_data) return species defaults. Invalid values (e.g., deleted templates) are replaced with safe fallbacks.
+
+**Response:**
+```json
+{
+  "success": true,
+  "customization_data": {
+    "template_id": "pointy-ear-cat",
+    "primary_color": "orange",
+    "secondary_color": "cream",
+    "pattern": "solid",
+    "accessory": null
+  }
+}
+```
+
+**Valid Values:**
+
+| Field | Valid Options |
+|-------|-------------|
+| template_id (cat) | `pointy-ear-cat`, `round-face-cat` |
+| template_id (dog) | `pointy-ear-dog`, `floppy-ear-dog`, `small-round-dog` |
+| template_id (rabbit) | `standard-rabbit` |
+| template_id (hamster) | `standard-hamster` |
+| primary_color / secondary_color | `orange`, `black`, `white`, `gray`, `darkBrown`, `lightBrown`, `cream`, `ginger` |
+| pattern | `solid`, `two-tone`, `tabby`, `cow` |
+| accessory | `null`, `bell-collar`, `scarf`, `crown`, `sunglasses` |
+
+### PUT /api/pets/{pet_id}/customization
+
+Validate and update a pet's customization data.
+
+**Request Body:**
+```json
+{
+  "template_id": "round-face-cat",
+  "primary_color": "black",
+  "secondary_color": "white",
+  "pattern": "cow",
+  "accessory": "bell-collar"
+}
+```
+
+All five fields are required. Values are validated against the pet's species.
+
+**Response:** `{"success": true, "pet": {...}}`
+
+**Error (400):** `{"detail": "invalid template_id for species: 'pointy-ear-dog' is not valid for 'cat'"}`
+
+---
+
+## LLM Tools (Bot-Invoked)
+
+These are not HTTP endpoints but LLM function tools registered with AstrBot. The bot can invoke them during conversations.
+
+### read_bookhouse_chapter
+
+Read a chapter from the bookshelf. Called when user asks bot to read a book.
+
+**Parameters:**
+```json
+{
+  "book_title": "书名 (fuzzy match)",
+  "chapter_index": 3
+}
+```
+
+- `book_title` (required): Book title, supports fuzzy/partial matching
+- `chapter_index` (optional): 0-based chapter index. Omit to continue from current progress.
+
+**Behavior:**
+- Returns up to 2000 chars per call (offset-based continuation)
+- Updates bot reading progress on sequential reads
+- Jump reads (non-sequential) don't advance the progress pointer
+- Triggers chapter memory generation when a chapter is fully read
+
+### recall_bookhouse_chat
+
+Recall chat history from the reading companion.
+
+**Parameters:**
+```json
+{
+  "book_title": "书名 (fuzzy match, optional)"
+}
+```
+
+- `book_title` (optional): Filter by book. Omit to get recent chats from all books.
+
+**Behavior:**
+- Returns last 15 messages per book session
+- Limited to 3 most recent books if no filter specified

@@ -15,8 +15,8 @@ from typing import Any
 from astrbot.api import logger
 from astrbot.api.star import Context
 
-from .session_manager import SessionManager
 from .book_manager import BookManager
+from .session_manager import SessionManager
 
 
 class ChatEngine:
@@ -97,9 +97,13 @@ class ChatEngine:
 - 如果对方问起前面章节的内容，你可以调用 read_bookhouse_chapter 工具获取
 - 保持对话的连贯性，记住这次阅读中聊过的内容"""
 
-        return f"{persona_prompt}{context_info}{reading_instructions}{chapter_injection}"
+        return (
+            f"{persona_prompt}{context_info}{reading_instructions}{chapter_injection}"
+        )
 
-    async def _call_llm(self, book_id: str, user_message: str, system_prompt: str) -> str:
+    async def _call_llm(
+        self, book_id: str, user_message: str, system_prompt: str
+    ) -> str:
         """Call the LLM with session context and return the response."""
         # record user message
         self.session_manager.add_chat_message(book_id, "user", user_message)
@@ -271,7 +275,9 @@ class ChatEngine:
                 if chapters and 0 <= chapter_index < len(chapters):
                     chapter_title = chapters[chapter_index].get("title", "")
                     # fetch full chapter text for LLM context
-                    chapter_text = self.book_manager.get_chapter_text(book_id, chapter_index) or ""
+                    chapter_text = (
+                        self.book_manager.get_chapter_text(book_id, chapter_index) or ""
+                    )
 
         system_prompt = await self._build_system_prompt(
             book_title=book_title,

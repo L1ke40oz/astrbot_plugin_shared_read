@@ -1,8 +1,8 @@
-# 乌鲁鲁星 (astrbot_plugin_shared_read)
+# 乌鲁鲁星 (astrbot_plugin_uluru_star)
 
 这是属于你们的故事。
 
-上传 epub/txt 书籍，在乌鲁鲁星里划线、写书评，他会像朋友一样陪你聊书中的故事。他也会自己读书，生成章节记忆，偶尔主动分享读后感。
+乌鲁鲁星是一个 AstrBot 阅读伴侣插件。上传 epub/txt 书籍后，Bot 会像朋友一样陪你一起读书——你可以划线、写书评、聊天讨论情节。Bot 也会自己读书、生成章节记忆，偶尔主动分享读后感。此外还有像素宠物屋、足迹板等社交功能。
 
 ## 功能概览
 
@@ -19,50 +19,122 @@
 | 📖 Bot 按需阅读 | 用户可通过对话让 Bot 去读某章，读完自动生成记忆 |
 | 🧠 章节记忆 | Bot 读完每章后生成 150-200 字摘要，持久化存储 |
 | 🔧 LLM 工具 | Bot 可主动调用工具读书/回忆对话（按需加载） |
-| 🗂 小窝 | 记忆管理、Bot 动态、纸条箱、连接状态 |
+| 🐾 宠物屋 | 像素宠物养成：投喂、摸摸、捏宠物自定义外观 |
+| 📸 足迹板 | 照片墙、便签纸条、Bot 动态（朋友圈风格） |
+| 🗂 小窝 | 记忆管理、Bot 动态、纸条箱、阅读进度、连接状态 |
 | 📊 阅读统计 | 主页展示共读数据（书架数、章节数、天数等） |
 | 🎨 主题系统 | 6 种色系（星紫/雾蓝/樱粉/苔绿/暖茶/深色） |
-| ✦ 粒子动效 | 可配置形状（爱心/四芒星/圆点）和颜色 |
-| 💌 纸条箱 | 给 Bot 留纸条，持久化存储 |
+| ✦ 粒子动效 | 可配置形状（爱心/四芒星/圆点/雪花）和颜色 |
 | 📱 PWA | 支持添加到手机桌面 |
 | 🔄 数据持久化 | 头像/昵称/封面/主题/进度全部服务端存储 |
 
 ## 架构
 
 ```
-astrbot_plugin_shared_read/
-├── main.py                     # 插件入口，注册钩子、工具和命令
-├── _conf_schema.json           # 配置项定义
+astrbot_plugin_uluru_star/
+├── main.py                     # 插件入口：注册钩子、LLM 工具、命令、后台任务
+├── _conf_schema.json           # 配置项定义（AstrBot 配置面板用）
 ├── metadata.yaml               # 插件元数据
 ├── requirements.txt            # Python 依赖（ebooklib, beautifulsoup4, chardet）
 ├── API.md                      # 后端 API 接口文档
+├── README.md                   # 本文件
 ├── templates/                  # 前端文件（默认模板，随插件更新）
-│   ├── index.html
-│   ├── style.css
-│   ├── app.js
+│   ├── index.html              # 单页应用入口
+│   ├── style.css               # 全局样式 + 主题变量
+│   ├── app.js                  # 主逻辑（书架、阅读器、聊天、足迹、宠物屋）
+│   ├── pet-customization-ui.js # 捏宠物面板 UI 交互
+│   ├── pet-sprite-renderer.js  # 像素宠物渲染引擎（CSS box-shadow）
+│   ├── pet-templates.js        # 宠物体型模板数据（16×16 网格）
+│   ├── pet-palette.js          # 调色板、花纹、配饰定义
 │   ├── manifest.json           # PWA 配置
-│   ├── sw.js                   # Service Worker
+│   ├── sw.js                   # Service Worker（离线缓存）
 │   ├── planet.png              # 设置页装饰图
-│   └── icons/                  # 底部导航图标
-│       ├── tools.jpg
-│       ├── placeholder.jpg
-│       ├── notes.jpg
-│       └── settings.jpg
+│   └── icons/                  # 底部导航 + 手风琴卡片图标
 └── core/
     ├── __init__.py
-    ├── session_manager.py      # 按书籍管理对话会话（持久化）
-    ├── book_manager.py         # epub/txt 解析、书籍/划线/笔记存储
-    ├── chat_engine.py          # 阅读聊天，滑动窗口注入，调用 LLM
-    ├── bot_reader.py           # Bot 自主阅读 + 章节记忆 + 主动消息
-    └── webui_server.py         # FastAPI + uvicorn 独立 Web 服务
+    ├── session_manager.py      # 按书籍管理对话会话（持久化到 JSON）
+    ├── book_manager.py         # epub/txt 解析、书籍/划线/笔记/书评存储
+    ├── chat_engine.py          # 阅读聊天：滑动窗口注入 + 人格解析 + LLM 调用
+    ├── bot_reader.py           # Bot 自主阅读 + 章节记忆 + 主动消息 + 动态生成
+    ├── pet_house_manager.py    # 宠物屋：CRUD、饥饿/心情衰减、外观自定义验证
+    └── webui_server.py         # FastAPI + uvicorn 独立 Web 服务（所有 API）
 ```
+
+## 模块职责
+
+### main.py — 插件入口
+
+- 注册 AstrBot 插件（`@register`）
+- 初始化所有核心组件
+- 注册 `/乌鲁鲁星` 命令
+- 注册 `on_llm_request` 钩子（注入书架提示到 LLM 上下文）
+- 注册 LLM 工具（`read_bookhouse_chapter`、`recall_bookhouse_chat`）
+- 启动后台任务（WebUI、Bot 阅读、宠物通知）
+- 管理 AstrBot 对话快照
+
+### core/session_manager.py — 会话管理
+
+- 每本书一个独立对话文件
+- 支持创建/恢复/结束会话
+- 心跳保活机制
+- 对话历史增删查
+
+### core/book_manager.py — 书籍管理
+
+- 解析 epub（ebooklib + BeautifulSoup）和 txt（chardet 编码检测）
+- 章节缓存（解析一次，后续直接读 JSON）
+- 划线、书评、笔记的 CRUD
+- 书架索引维护
+
+### core/chat_engine.py — 聊天引擎
+
+- 人格解析：插件配置覆盖 > 指定人格 > AstrBot 默认人格
+- 滑动窗口注入：根据 scroll_percent / bookmark_percent 截取章节内容
+- 调用 LLM 并维护会话上下文
+
+### core/bot_reader.py — Bot 阅读器
+
+- 后台定时阅读循环（可配置间隔）
+- 章节记忆生成（调用 LLM 总结）
+- 用户进度追踪（高水位模式）
+- 主动消息发送（避免打断活跃对话）
+- Bot 动态生成（足迹板碎碎念）
+
+### core/pet_house_manager.py — 宠物屋管理
+
+- 宠物 CRUD（创建/改名/删除）
+- 时间衰减系统：饥饿 5/h、心情 3/h（仅饥饿<30时衰减）
+- 投喂（饥饿→100）和摸摸（心情+5~15）
+- 外观自定义验证与归一化
+- 彩蛋评论池（投喂/摸摸时随机返回）
+- 通知状态管理（心情<20 时触发 QQ 通知）
+
+### core/webui_server.py — Web 服务
+
+- FastAPI 应用，uvicorn 异步运行
+- 模板加载优先级：custom_templates > templates
+- 所有 REST API 端点
+- 静态文件服务
+- Profile 持久化
+
+### templates/ — 前端
+
+前端是纯 JavaScript 单页应用（无构建工具），通过 `<script>` 标签按顺序加载：
+
+1. `pet-templates.js` — 宠物体型数据
+2. `pet-palette.js` — 颜色/花纹/配饰定义
+3. `pet-sprite-renderer.js` — 渲染引擎
+4. `pet-customization-ui.js` — 捏宠物 UI
+5. `app.js` — 主应用逻辑
+
+宠物渲染使用 CSS box-shadow 像素画技术：每个非透明像素变成一个 `Xpx Ypx 0 #color` 条目。
 
 ## 数据存储
 
-所有持久化数据存储在 `data/plugin_data/astrbot_plugin_shared_read/`：
+所有持久化数据存储在 `data/plugin_data/astrbot_plugin_uluru_star/`：
 
 ```
-plugin_data/astrbot_plugin_shared_read/
+plugin_data/astrbot_plugin_uluru_star/
 ├── books/
 │   ├── epub_files/             # 原始 epub/txt 文件
 │   ├── cache/                  # 解析后的章节 JSON 缓存
@@ -70,9 +142,13 @@ plugin_data/astrbot_plugin_shared_read/
 ├── sessions/
 │   └── books/                  # 每本书一个 JSON 对话文件
 │       └── {book_id}_{书名}.json
-├── assets/                     # 用户自定义图片资源
+├── assets/                     # 用户上传的图片资源
+│   └── footprints/
+│       ├── originals/          # 原图
+│       └── thumbs/             # 缩略图（300px 宽）
 ├── custom_templates/           # 用户自定义前端文件（优先加载）
-├── profile.json                # 用户数据（头像/昵称/封面/主题/粒子/纸条）
+├── profile.json                # 用户数据（头像/昵称/封面/主题/粒子/足迹/便签）
+├── pet_house.json              # 宠物数据（所有宠物状态）
 ├── bot_reading_progress.json   # Bot 的阅读进度
 ├── user_reading_progress.json  # 用户的阅读进度
 ├── bot_chapter_memories.json   # Bot 的章节记忆摘要
@@ -81,63 +157,92 @@ plugin_data/astrbot_plugin_shared_read/
 
 ## 核心机制
 
-### 1. 滑动窗口注入
+### 1. LLM 上下文注入（on_llm_request 钩子）
 
-聊天时不注入整章内容，而是根据用户阅读位置：
+每次 QQ 等平台触发 LLM 请求时，插件注入轻量书架提示：
+- 书名列表 + 双方阅读进度百分比
+- 提示 Bot 可调用工具获取详细内容
+- 自动清理历史注入（防止上下文膨胀）
+
+设计原则：不在系统提示中塞大量内容，而是通过工具按需加载。
+
+### 2. 滑动窗口注入（聊天时）
+
+聊天时根据用户阅读位置注入章节内容：
 - 短章节（≤3000字）：全量注入
 - 长章节：注入当前滚动位置前后 2000 字窗口
 - 有书签时：注入书签位置到当前位置之间的内容
 - 最大注入量 3000 字
 
-### 2. 章节记忆系统
+### 3. 章节记忆系统
 
 Bot 读完一章后（打卡/工具调用/自动推进），调用 LLM 生成 150-200 字摘要：
-- 输入：章节原文 + 用户划线
+- 输入：章节原文（前 1500 字）+ 用户划线
 - 输出：从 Bot 视角的故事总结 + 互动记忆
-- 存储在 `bot_chapter_memories.json`
-- 注入到 AstrBot 的 LLM 上下文中（最近 5 章/书）
-
-### 3. 摘要注入（on_llm_request 钩子）
-
-每次 QQ 等平台触发 LLM 时注入：
-- 对话摘要（每本书一行）
-- 书架信息（书名 + 双方进度）
-- 章节记忆（最近几章的摘要）
+- 去重：已有记忆的章节不会重复生成
+- Bot 进度严格基于已生成记忆的章节数
 
 ### 4. LLM 工具
 
-- **read_bookhouse_chapter** - 阅读章节（2000字/次，读完自动生成记忆）
-- **recall_bookhouse_chat** - 回忆对话记录（最近15条）
+| 工具名 | 用途 | 参数 |
+|--------|------|------|
+| `read_bookhouse_chapter` | 阅读章节内容 | `book_title`(必填), `chapter_index`(可选) |
+| `recall_bookhouse_chat` | 回忆对话记录 | `book_title`(可选) |
+
+工具支持续读（offset-based）：单次返回 2000 字，未读完的章节下次调用继续。
 
 ### 5. Bot 自主阅读
 
-后台定时任务（可配置间隔）：
-1. 随机选一本未读完的书
-2. 推进 1-2 章
-3. 生成章节记忆摘要
-4. 有概率发送主动消息
+后台定时任务（可配置间隔 120-300 分钟）：
+1. 选择一本有未读章节的书
+2. 找到第一个没有记忆的章节
+3. 调用 LLM 生成章节记忆
+4. 记忆生成成功才算进度推进
+5. 有概率发送主动消息（避免打断活跃对话）
+
+### 6. 宠物屋系统
+
+- 时间衰减：饥饿每小时 -5，心情每小时 -3（仅饥饿<30时）
+- 动画状态：mood<20→sad, hunger<30→hungry, mood>70→happy, 否则→idle
+- 外观自定义：体型模板 × 主色 × 副色 × 花纹 × 配饰
+- 渲染：16×16 像素网格 → CSS box-shadow 字符串
+- 通知：心情<20 时通过 QQ 发送提醒
+
+### 7. Bot 动态
+
+后台定时任务（4-8 小时间隔）：
+- 结合时间、最近阅读、章节记忆生成碎碎念
+- 保存到 profile.json 的 footprints 列表
+- 前端以朋友圈风格展示，支持点赞和回复
 
 ## 配置项
 
 | 分组 | 配置 | 说明 | 默认值 |
 |------|------|------|--------|
 | WebUI | enabled | 启用网页服务 | true |
-| WebUI | host | 监听地址 | 0.0.0.0 |
+| WebUI | host | 监听地址（0.0.0.0=局域网可访问） | 0.0.0.0 |
 | WebUI | port | 端口 | 1016 |
+| - | auto_reply_on_highlight | 划线时自动触发回复 | true |
+| - | auto_reply_on_review | 书评时自动触发回复 | true |
+| - | auto_reply_on_note | 纸条时自动触发回复 | true |
+| - | reply_to_message_channel | 同时发送到消息通道 | false |
 | - | message_separator | 消息分段正则 | \\$ |
 | Bot 阅读 | enabled | 启用自主阅读 | true |
 | Bot 阅读 | reading_interval_min | 阅读间隔下限(分钟) | 120 |
 | Bot 阅读 | reading_interval_max | 阅读间隔上限(分钟) | 300 |
 | Bot 阅读 | message_probability | 主动消息概率(%) | 30 |
 | Bot 阅读 | no_interrupt_minutes | 聊天保护时间(分钟) | 5 |
+| Bot 阅读 | dynamics_interval_min | 动态间隔下限(小时) | 4 |
+| Bot 阅读 | dynamics_interval_max | 动态间隔上限(小时) | 8 |
+| 宠物屋 | enabled | 启用宠物屋功能 | true |
 | 高级 | provider | 固定 Provider | (空=默认) |
 | 高级 | persona | 固定人格 | (空=默认) |
 | 高级 | persona_override | 手动人格覆盖 | (空) |
 
 ## 使用方式
 
-1. 安装插件，确保依赖已安装
-2. 在 QQ 发送 `/乌鲁鲁星` 获取访问地址
+1. 安装插件，确保依赖已安装（`pip install ebooklib beautifulsoup4 chardet`）
+2. 在 QQ 发送 `/乌鲁鲁星` 获取访问地址（同时注册目标会话用于主动消息）
 3. 浏览器打开地址，上传 epub/txt 开始阅读
 4. 划线、聊天、打卡，Bot 会陪你一起读
 5. 在 QQ 里也可以让 Bot 去读书、讨论书中内容
@@ -146,4 +251,35 @@ Bot 读完一章后（打卡/工具调用/自动推进），调用 LLM 生成 15
 
 前端文件加载优先级：`custom_templates/` > `templates/`
 
-图片资源加载优先级：`/assets/` (plugin_data) > `/static/` (templates)
+将修改后的文件放入 `plugin_data/astrbot_plugin_uluru_star/custom_templates/` 即可覆盖默认模板，插件更新不会覆盖自定义文件。
+
+## 扩展指南
+
+### 添加新的宠物物种
+
+1. `pet_house_manager.py`：在 `PRESET_SPECIES` 和 `VALID_TEMPLATES` 中添加物种
+2. `pet-templates.js`：添加 16×16 网格模板（含 patternMasks 和 accessoryAnchors）
+3. `pet-palette.js`：在 `DEFAULT_CUSTOMIZATION` 中添加默认外观
+
+### 添加新的配饰
+
+1. `pet_house_manager.py`：在 `VALID_ACCESSORIES` 中添加 ID
+2. `pet-palette.js`：在 `ACCESSORIES` 中添加像素数据
+3. 每个模板的 `accessoryAnchors` 中添加锚点坐标
+
+### 添加新的 LLM 工具
+
+1. `main.py`：定义参数 schema 和 handler 函数
+2. 在 `_register_read_tool()` 中注册 `FunctionTool`
+3. Handler 签名：`async def handler(self, *args, **kwargs) -> str`
+
+### 添加新的 API 端点
+
+1. `webui_server.py`：在 `_setup_app()` 中添加路由
+2. 更新 `API.md` 文档
+
+### 修改人格/提示词
+
+- 配置面板中设置 `persona_override` 可直接覆盖系统提示
+- 或通过 `persona` 选择 AstrBot 中已配置的人格
+- 阅读相关指令在 `chat_engine.py` 的 `_build_system_prompt()` 中
