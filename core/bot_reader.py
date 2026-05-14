@@ -400,11 +400,9 @@ class BotReader:
                 if custom:
                     default_summary_prompt = custom
 
-            instruction = (
-                default_summary_prompt.replace("{{book_title}}", book_title).replace(
-                    "{{chapter_title}}", chapter_title
-                )
-            )
+            instruction = default_summary_prompt.replace(
+                "{{book_title}}", book_title
+            ).replace("{{chapter_title}}", chapter_title)
 
             prompt = (
                 f"{instruction}\n\n"
@@ -562,11 +560,85 @@ class BotReader:
             f"乌鲁鲁星: 自动阅读完成 《{book.get('title', '')}》第{next_chapter + 1}章"
         )
 
-        # maybe send a proactive message based on configured probability
+        # generate bot review if enabled
         bot_config = self.config.get("bot_reading", {})
+        if bot_config.get("bot_review_enabled", False):
+            await self._generate_bot_review(book_id, next_chapter)
+
+        # maybe send a proactive message based on configured probability
         probability = bot_config.get("message_probability", 30) / 100.0
         if random.random() < probability:
             await self._send_reading_message(book_id)
+
+    async def _generate_bot_review(self, book_id: str, chapter_index: int):
+        """Generate a bot-authored book review after reading a chapter.
+
+        Uses the chapter memory as context to write a short review,
+        then saves it to the book's review list via book_manager.
+        """
+        try:
+            # get chapter memory as context
+            memory = self.get_chapter_memory(book_id, chapter_index)
+            if not memory:
+                return
+
+            # get book and chapter info
+            books = self.book_manager.list_books()
+            book = next((b for b in books if b["id"] == book_id), None)
+            book_title = book.get("title", "未知") if book else "未知"
+
+            chapters = self.book_manager.get_chapters(book_id)
+            chapter_title = ""
+            if chapters and 0 <= chapter_index < len(chapters):
+                chapter_title = chapters[chapter_index].get(
+                    "title", f"第{chapter_index + 1}章"
+                )
+
+            # build prompt
+            default_review_prompt = (
+                "你刚读完了《{{book_title}}》的{{chapter_title}}。\n"
+                "请写一段简短的读后感作为书评，分享你对这章的感受。\n"
+                "风格要求：自然、有感情、像是随手写下的感想。50-100字。\n"
+                "直接输出书评内容，不要加引号或前缀。只使用普通标点符号。"
+            )
+
+            # check for custom prompt
+            special = self.config.get("special", {})
+            if special.get("custom_prompts_enabled", False):
+                custom = special.get("prompt_bot_review", "").strip()
+                if custom:
+                    default_review_prompt = custom
+
+            prompt_text = default_review_prompt.replace(
+                "{{book_title}}", book_title
+            ).replace("{{chapter_title}}", chapter_title)
+
+            # add memory as context
+            prompt = f"{prompt_text}\n\n你的章节记忆：\n{memory}"
+
+            provider = self.context.get_using_provider()
+            if not provider:
+                return
+
+            persona = await self._get_persona_prompt()
+            resp = await provider.text_chat(prompt=prompt, system_prompt=persona)
+            review_text = (resp.completion_text or "").strip()
+
+            if not review_text or len(review_text) > 200:
+                return
+
+            # save as a bot review
+            self.book_manager.add_review(
+                book_id, chapter_index, review_text, author="bot"
+            )
+
+            logger.info(
+                f"乌鲁鲁星: Bot 自主书评已生成 book={book_id} ch={chapter_index} "
+                f"len={len(review_text)}"
+            )
+
+        except Exception as e:
+            logger.debug(f"乌鲁鲁星: Bot 自主书评生成失败: {e}")
 
     async def _send_reading_message(self, book_id: str):
         """Send a proactive message about what the bot just read."""
@@ -620,7 +692,8 @@ class BotReader:
 
         # send the message (supports segmented sending via message_separator)
         try:
-            separator = self.config.get("message_separator", "")
+            special = self.config.get("special", {})
+            separator = special.get("message_separator", "")
             segments = [message_text]
 
             # split by separator if configured
@@ -755,6 +828,40 @@ class BotReader:
                         break
             if recent_memory:
                 context_parts.append(f"最近的阅读感受：{recent_memory}")
+
+            # recent user moments and sticky notes from profile
+            try:
+                profile = self._load_profile()
+
+                # user moments + replies
+                footprints = profile.get("footprints", [])
+                user_moments = [
+                    fp for fp in footprints if fp.get("type") == "user_note"
+                ]
+                user_moments.sort(key=lambda x: x.get("created_at", 0), reverse=True)
+                if user_moments:
+                    m = user_moments[0]
+                    moment_text = f"她最近发了动态：「{m.get('content', '')[:40]}」"
+                    replies = m.get("replies", [])
+                    if replies:
+                        last_reply = replies[-1]
+                        if last_reply.get("role") == "user":
+                            moment_text += f"，她还评论了：「{last_reply.get('content', '')[:30]}」"
+                    context_parts.append(moment_text)
+
+                # recent sticky notes
+                fp_notes = profile.get("fp_notes", [])
+                recent_notes = sorted(
+                    fp_notes, key=lambda x: x.get("created_at", 0), reverse=True
+                )[:1]
+                if recent_notes:
+                    n = recent_notes[0]
+                    note_text = f"她最近在便签板写了：「{n.get('content', '')[:40]}」"
+                    if n.get("reply"):
+                        note_text += f"，你回了：「{n['reply'][:30]}」"
+                    context_parts.append(note_text)
+            except Exception:
+                pass
 
             context_str = "。".join(context_parts)
 

@@ -151,7 +151,8 @@ class WebUIServer:
             separator = "\\$"
             pet_house_enabled = True
             if self.plugin and hasattr(self.plugin, "config"):
-                separator = self.plugin.config.get("message_separator", "\\$")
+                special = self.plugin.config.get("special", {})
+                separator = special.get("message_separator", "\\$")
             if self.plugin and hasattr(self.plugin, "_pet_house_enabled"):
                 pet_house_enabled = self.plugin._pet_house_enabled
             return {
@@ -316,9 +317,13 @@ class WebUIServer:
             # record highlight as a system note in chat history
             # so the LLM knows what user highlighted when they ask about it
             try:
-                ch_label = f"第{chapter_index + 1}章" if chapter_index is not None else ""
+                ch_label = (
+                    f"第{chapter_index + 1}章" if chapter_index is not None else ""
+                )
                 if chapter_title:
-                    ch_label = f"{ch_label}·{chapter_title}" if ch_label else chapter_title
+                    ch_label = (
+                        f"{ch_label}·{chapter_title}" if ch_label else chapter_title
+                    )
                 ch_prefix = f"（{ch_label}）" if ch_label else ""
                 note_content = f"[划线{ch_prefix}] 她划了这句：「{text}」"
                 if context_text:
@@ -338,7 +343,8 @@ class WebUIServer:
             # Auto-reply on highlight if enabled
             bot_reply = None
             if self.plugin and hasattr(self.plugin, "config"):
-                if self.plugin.config.get("auto_reply_on_highlight", True):
+                interactions = self.plugin.config.get("interactions", {})
+                if interactions.get("auto_reply_on_highlight", True):
                     try:
                         bot_reply = await self.chat_engine.respond_to_highlight(
                             book_id, book_id, chapter_index, text, context_text
@@ -363,7 +369,8 @@ class WebUIServer:
 
             bot_reply = None
             if self.plugin and hasattr(self.plugin, "config"):
-                if self.plugin.config.get("auto_reply_on_review", True):
+                interactions = self.plugin.config.get("interactions", {})
+                if interactions.get("auto_reply_on_review", True):
                     bot_reply = await self.chat_engine.respond_to_review(
                         book_id, book_id, chapter_index, content
                     )
@@ -383,6 +390,15 @@ class WebUIServer:
                         book_id, chapter_index, force=True
                     )
                 )
+
+            # Send review notification to message channel
+            if bot_reply:
+                book_title = ""
+                books = self.book_manager.list_books()
+                book_info = next((b for b in books if b["id"] == book_id), None)
+                if book_info:
+                    book_title = book_info.get("title", "")
+                asyncio.create_task(self._notify_on_review(bot_reply, book_title))
 
             return {"success": True, "review": review, "bot_reply": bot_reply}
 
@@ -465,6 +481,15 @@ class WebUIServer:
                 asyncio.create_task(
                     self.bot_reader.generate_chapter_summary(book_id, chapter_index)
                 )
+
+                # send checkin notification to message channel
+                chapter_title = ""
+                chapters = self.book_manager.get_chapters(book_id)
+                if chapters and 0 <= chapter_index < len(chapters):
+                    chapter_title = chapters[chapter_index].get(
+                        "title", f"第{chapter_index + 1}章"
+                    )
+                asyncio.create_task(self._notify_on_checkin(book_title, chapter_title))
 
             return {"success": True, "message": "打卡成功"}
 
@@ -1072,9 +1097,7 @@ class WebUIServer:
             profile = self._load_profile()
             footprints = profile.get("footprints", [])
             moments = [
-                fp
-                for fp in footprints
-                if fp.get("type") in ("bot_note", "user_note")
+                fp for fp in footprints if fp.get("type") in ("bot_note", "user_note")
             ]
             moments.sort(key=lambda x: x.get("created_at", 0), reverse=True)
             return {"success": True, "moments": moments}
@@ -1309,6 +1332,11 @@ class WebUIServer:
             pet_data["animation_state"] = (
                 self.plugin.pet_house_manager.get_animation_state(pet)
             )
+
+            # send pet interaction notification
+            if comment:
+                asyncio.create_task(self._notify_on_pet(pet.name, "feed", comment))
+
             return {"success": True, "pet": pet_data, "comment": comment}
 
         @app.post("/api/pets/{pet_id}/pet")
@@ -1326,6 +1354,11 @@ class WebUIServer:
             pet_data["animation_state"] = (
                 self.plugin.pet_house_manager.get_animation_state(pet)
             )
+
+            # send pet interaction notification
+            if comment:
+                asyncio.create_task(self._notify_on_pet(pet.name, "pet", comment))
+
             return {"success": True, "pet": pet_data, "comment": comment}
 
         @app.get("/api/pets/{pet_id}/photo")
@@ -1429,6 +1462,128 @@ class WebUIServer:
             pet_data["animation_state"] = mgr.get_animation_state(pet)
             return {"success": True, "pet": pet_data}
 
+    # --- Notification helpers (send to QQ message channel) ---
+
+    def _get_interactions_config(self) -> dict:
+        """Get the interactions config section."""
+        if not self.plugin or not hasattr(self.plugin, "config"):
+            return {}
+        return self.plugin.config.get("interactions", {})
+
+    async def _send_to_message_channel(self, text: str):
+        """Send a message to the QQ message channel via bot_reader's target_session.
+
+        Supports segmented sending via message_separator config.
+        Silently skips if no target session is available.
+        """
+        if not self.bot_reader or not self.bot_reader.target_session:
+            logger.debug("乌鲁鲁星: 没有目标 session，跳过消息通道通知")
+            return
+
+        from astrbot.core.message.components import Plain
+        from astrbot.core.message.message_event_result import MessageChain
+
+        try:
+            # support segmented sending
+            special = {}
+            if self.plugin and hasattr(self.plugin, "config"):
+                special = self.plugin.config.get("special", {})
+            separator = special.get("message_separator", "")
+            segments = [text]
+
+            if separator:
+                try:
+                    import re as _re
+
+                    parts = _re.split(separator, text)
+                    parts = [p.strip() for p in parts if p.strip()]
+                    if parts:
+                        segments = parts
+                except Exception:
+                    pass
+
+            for i, seg in enumerate(segments):
+                chain = MessageChain([Plain(text=seg)])
+                await self.plugin.context.send_message(
+                    self.bot_reader.target_session, chain
+                )
+                if i < len(segments) - 1:
+                    await asyncio.sleep(random.uniform(1.0, 2.5))
+
+            logger.info(f"乌鲁鲁星: 已发送通知到消息通道 ({len(segments)} 段)")
+        except Exception as e:
+            logger.error(f"乌鲁鲁星: 发送消息通道通知失败: {e}")
+
+    async def _notify_on_checkin(self, book_title: str, chapter_title: str):
+        """Send checkin notification to message channel if enabled."""
+        interactions = self._get_interactions_config()
+        if not interactions.get("notify_on_checkin", True):
+            return
+
+        # generate a short message using LLM
+        if not self.plugin or not hasattr(self.plugin, "context"):
+            return
+
+        provider = self.plugin.context.get_using_provider()
+        if not provider:
+            # fallback: send a simple text notification
+            await self._send_to_message_channel(
+                f"她刚读完了《{book_title}》的{chapter_title}，打卡啦~"
+            )
+            return
+
+        persona = ""
+        if self.bot_reader:
+            persona = await self.bot_reader._get_persona_prompt()
+
+        prompt = (
+            f"她刚读完了《{book_title}》的{chapter_title}并打卡了。\n"
+            f"请用一两句话回应她的打卡，可以是鼓励、感慨或分享你对这章的感受。\n"
+            f"简短自然，像发消息一样。不要超过40个字。\n"
+            f"直接输出内容，不要加引号或前缀。只使用普通标点符号。"
+        )
+
+        try:
+            resp = await provider.text_chat(prompt=prompt, system_prompt=persona)
+            reply = (resp.completion_text or "").strip()
+            if reply:
+                await self._send_to_message_channel(reply)
+        except Exception as e:
+            logger.debug(f"乌鲁鲁星: 打卡通知生成失败: {e}")
+            # fallback
+            await self._send_to_message_channel(
+                f"她刚读完了《{book_title}》的{chapter_title}，打卡啦~"
+            )
+
+    async def _notify_on_review(self, bot_reply: str, book_title: str):
+        """Send review notification to message channel if enabled."""
+        interactions = self._get_interactions_config()
+        if not interactions.get("notify_on_review", True):
+            return
+
+        if bot_reply:
+            await self._send_to_message_channel(bot_reply)
+
+    async def _notify_on_note(self, bot_reply: str):
+        """Send note reply notification to message channel if enabled."""
+        interactions = self._get_interactions_config()
+        if not interactions.get("notify_on_note", False):
+            return
+
+        if bot_reply:
+            await self._send_to_message_channel(bot_reply)
+
+    async def _notify_on_pet(self, pet_name: str, action: str, comment: str):
+        """Send pet interaction notification to message channel if enabled."""
+        interactions = self._get_interactions_config()
+        if not interactions.get("notify_on_pet", False):
+            return
+
+        if comment:
+            # use the pet's comment as the notification
+            msg = f"[{pet_name}] {comment}"
+            await self._send_to_message_channel(msg)
+
     async def _generate_note_reply(self, note_id: str, user_content: str):
         """Generate a bot reply to a user's sticky note (async, delayed)."""
         try:
@@ -1454,7 +1609,9 @@ class WebUIServer:
                 "直接输出回复内容，不要加引号或前缀。"
                 "只使用普通标点符号，不要使用特殊分隔符号。"
             )
-            prompt_template = self._get_custom_prompt("prompt_note_reply", default_prompt)
+            prompt_template = self._get_custom_prompt(
+                "prompt_note_reply", default_prompt
+            )
             prompt = prompt_template.replace("{{content}}", user_content)
 
             resp = await provider.text_chat(prompt=prompt, system_prompt=persona)
@@ -1474,6 +1631,9 @@ class WebUIServer:
             self._save_profile(profile)
 
             logger.info(f"乌鲁鲁星: 便签回复已生成: {reply_text[:20]}...")
+
+            # send to message channel if enabled
+            await self._notify_on_note(reply_text)
         except Exception as e:
             logger.debug(f"乌鲁鲁星: 便签回复生成失败: {e}")
 
@@ -1539,14 +1699,10 @@ class WebUIServer:
                             f"  {role_label} 回复 {reply_to_str}：{r.get('content', '')}"
                         )
                     else:
-                        context_lines.append(
-                            f"  {role_label}：{r.get('content', '')}"
-                        )
+                        context_lines.append(f"  {role_label}：{r.get('content', '')}")
 
             if reply_to:
-                context_lines.append(
-                    f"她回复了{reply_to}：「{user_reply}」"
-                )
+                context_lines.append(f"她回复了{reply_to}：「{user_reply}」")
             else:
                 context_lines.append(f"她评论了：「{user_reply}」")
 

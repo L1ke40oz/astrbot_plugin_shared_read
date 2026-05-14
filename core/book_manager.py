@@ -260,9 +260,7 @@ class BookManager:
         try:
             import fitz  # PyMuPDF
         except ImportError:
-            raise ValueError(
-                "PDF 支持需要安装 PyMuPDF：pip install PyMuPDF"
-            )
+            raise ValueError("PDF 支持需要安装 PyMuPDF：pip install PyMuPDF")
 
         # save pdf file
         pdf_path = self.epub_dir / f"{book_id}.pdf"
@@ -441,13 +439,18 @@ class BookManager:
     # ==================== Reviews ====================
 
     def add_review(
-        self, book_id: str, chapter_index: int | None, content: str
+        self,
+        book_id: str,
+        chapter_index: int | None,
+        content: str,
+        author: str = "user",
     ) -> dict[str, Any]:
         """Save a book review / paragraph comment."""
         review = {
             "id": uuid.uuid4().hex[:8],
             "chapter_index": chapter_index,
             "content": content,
+            "author": author,
             "created_at": time.time(),
         }
         self.library.setdefault("reviews", {}).setdefault(book_id, []).append(review)

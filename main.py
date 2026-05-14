@@ -106,7 +106,8 @@ class SharedReadPlugin(Star):
         )
 
         # Pet house manager (conditional)
-        pet_house_config = config.get("pet_house", {})
+        interactions_config = config.get("interactions", {})
+        pet_house_config = interactions_config.get("pet_house", {})
         self._pet_house_enabled = pet_house_config.get("enabled", True)
         if self._pet_house_enabled:
             self.pet_house_manager = PetHouseManager(data_dir=self.data_dir)
@@ -269,7 +270,9 @@ class SharedReadPlugin(Star):
                             if reply:
                                 line += f" → 你回：「{reply[:30]}」"
                             note_lines.append(line)
-                        footprint_hint += "最近的便签：\n" + "\n".join(note_lines) + "\n"
+                        footprint_hint += (
+                            "最近的便签：\n" + "\n".join(note_lines) + "\n"
+                        )
 
                     # Recent moments (last 3)
                     footprints = profile.get("footprints", [])
@@ -278,9 +281,7 @@ class SharedReadPlugin(Star):
                         for fp in footprints
                         if fp.get("type") in ("bot_note", "user_note")
                     ]
-                    moments.sort(
-                        key=lambda x: x.get("created_at", 0), reverse=True
-                    )
+                    moments.sort(key=lambda x: x.get("created_at", 0), reverse=True)
                     recent_moments = moments[:3]
                     if recent_moments:
                         moment_lines = []
@@ -361,6 +362,7 @@ class SharedReadPlugin(Star):
                 if isinstance(msg, str):
                     if BOOKHOUSE_INJECTION_HEADER in msg:
                         cleaned = self._cleanup_pattern.sub("", msg).strip()
+                        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
                         if not cleaned:
                             removed += 1
                             continue
@@ -370,20 +372,65 @@ class SharedReadPlugin(Star):
                             continue
                 elif isinstance(msg, dict):
                     content = msg.get("content", "")
-                    if (
-                        isinstance(content, str)
-                        and BOOKHOUSE_INJECTION_HEADER in content
-                    ):
-                        cleaned = self._cleanup_pattern.sub("", content).strip()
-                        if not cleaned:
+
+                    # Handle string content
+                    if isinstance(content, str):
+                        if (
+                            BOOKHOUSE_INJECTION_HEADER in content
+                            and BOOKHOUSE_INJECTION_FOOTER in content
+                        ):
+                            cleaned = self._cleanup_pattern.sub("", content).strip()
+                            cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+                            if not cleaned:
+                                removed += 1
+                                continue
+                            if cleaned != content:
+                                removed += 1
+                                msg_copy = msg.copy()
+                                msg_copy["content"] = cleaned
+                                filtered.append(msg_copy)
+                                continue
+
+                    # Handle list content (multimodal format)
+                    elif isinstance(content, list):
+                        cleaned_parts = []
+                        has_changes = False
+                        for part in content:
+                            if isinstance(part, dict) and part.get("type") == "text":
+                                text = part.get("text", "")
+                                if (
+                                    isinstance(text, str)
+                                    and BOOKHOUSE_INJECTION_HEADER in text
+                                    and BOOKHOUSE_INJECTION_FOOTER in text
+                                ):
+                                    cleaned_text = self._cleanup_pattern.sub(
+                                        "", text
+                                    ).strip()
+                                    cleaned_text = re.sub(
+                                        r"\n{3,}", "\n\n", cleaned_text
+                                    )
+                                    if not cleaned_text:
+                                        has_changes = True
+                                        removed += 1
+                                        continue
+                                    if cleaned_text != text:
+                                        has_changes = True
+                                        removed += 1
+                                        part_copy = part.copy()
+                                        part_copy["text"] = cleaned_text
+                                        cleaned_parts.append(part_copy)
+                                        continue
+                            cleaned_parts.append(part)
+
+                        if not cleaned_parts:
                             removed += 1
                             continue
-                        if cleaned != content:
-                            removed += 1
+                        if has_changes:
                             msg_copy = msg.copy()
-                            msg_copy["content"] = cleaned
+                            msg_copy["content"] = cleaned_parts
                             filtered.append(msg_copy)
                             continue
+
                 filtered.append(msg)
             req.contexts = filtered
 

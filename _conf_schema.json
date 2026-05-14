@@ -25,30 +25,6 @@
       }
     }
   },
-  "auto_reply_on_highlight": {
-    "description": "划线时自动触发回复",
-    "type": "bool",
-    "hint": "划线时是否自动触发回复",
-    "default": true
-  },
-  "auto_reply_on_review": {
-    "description": "书评时自动触发回复",
-    "type": "bool",
-    "hint": "写书评时是否自动触发 Bot 回复",
-    "default": true
-  },
-  "reply_to_message_channel": {
-    "description": "同时发送到消息通道",
-    "type": "bool",
-    "hint": "是否同时将他的回复发送到消息通道（如 QQ）。关闭则仅在乌鲁鲁星网页内显示。",
-    "default": false
-  },
-  "message_separator": {
-    "description": "消息分段符",
-    "type": "string",
-    "hint": "Bot 回复中的分段符号（正则表达式）。匹配到的位置会拆分为多条气泡显示。例如填 \\$ 表示用 $ 分段。留空则不分段。",
-    "default": "\\$"
-  },
   "bot_reading": {
     "description": "阅读设置",
     "type": "object",
@@ -59,6 +35,12 @@
         "type": "bool",
         "hint": "开启后他会在后台自己阅读书籍，并有概率主动发消息分享感想",
         "default": true
+      },
+      "bot_review_enabled": {
+        "description": "Bot 自主书评",
+        "type": "bool",
+        "hint": "开启后他读完一章并生成章节记忆后，还会额外撰写一段书评发布到书评区",
+        "default": false
       },
       "reading_interval_min": {
         "description": "阅读间隔下限（分钟）",
@@ -98,24 +80,73 @@
       }
     }
   },
-  "pet_house": {
-    "description": "宠物屋",
+  "interactions": {
+    "description": "互动与通知",
     "type": "object",
-    "hint": "像素小宠物功能。关闭后前端不显示宠物屋模块。",
+    "hint": "控制网页内的自动回复行为，以及哪些互动会同步发送到消息通道（如 QQ）。",
     "items": {
-      "enabled": {
-        "description": "启用宠物屋",
+      "auto_reply_on_highlight": {
+        "description": "划线时自动触发回复",
         "type": "bool",
-        "hint": "是否启用宠物屋功能（投喂、摸摸、捏宠物等）",
+        "hint": "划线时是否自动触发 Bot 在网页内回复",
         "default": true
+      },
+      "auto_reply_on_review": {
+        "description": "书评时自动触发回复",
+        "type": "bool",
+        "hint": "写书评时是否自动触发 Bot 在网页内回复",
+        "default": true
+      },
+      "notify_on_checkin": {
+        "description": "打卡时发送到消息通道",
+        "type": "bool",
+        "hint": "用户完成章节打卡后，Bot 将打卡消息和感想发送到 QQ 等消息通道",
+        "default": true
+      },
+      "notify_on_review": {
+        "description": "书评时发送到消息通道",
+        "type": "bool",
+        "hint": "用户提交书评后，Bot 的回复同时发送到 QQ 等消息通道",
+        "default": true
+      },
+      "notify_on_note": {
+        "description": "便签时发送到消息通道",
+        "type": "bool",
+        "hint": "用户写便签后，Bot 的回复同时发送到 QQ 等消息通道",
+        "default": false
+      },
+      "notify_on_pet": {
+        "description": "宠物互动时发送到消息通道",
+        "type": "bool",
+        "hint": "投喂或摸摸宠物时，将宠物的反应发送到 QQ 等消息通道",
+        "default": false
+      },
+      "pet_house": {
+        "description": "宠物屋",
+        "type": "object",
+        "hint": "像素小宠物功能。关闭后前端不显示宠物屋模块。",
+        "items": {
+          "enabled": {
+            "description": "启用宠物屋",
+            "type": "bool",
+            "hint": "是否启用宠物屋功能（投喂、摸摸、捏宠物等）",
+            "default": true
+          }
+        }
       }
     }
   },
   "special": {
     "description": "高级设置",
     "type": "object",
-    "hint": "人格、模型选择和自定义提示词",
+    "hint": "消息格式、人格、模型选择和自定义提示词",
     "items": {
+      "message_separator": {
+        "description": "消息分段符",
+        "type": "string",
+        "hint": "Bot 回复中的分段符号（正则表达式）。匹配到的位置会拆分为多条气泡显示。例如填 \\$ 表示用 $ 分段。留空则不分段。",
+        "default": "\\$"
+      },
       "provider": {
         "description": "固定 Provider",
         "hint": "为空则使用 AstrBot 当前默认 Provider",
@@ -137,15 +168,15 @@
         "default": ""
       },
       "injection_method": {
-        "description": "📍 上下文注入方式",
+        "description": "上下文注入方式",
         "type": "string",
         "options": ["system_prompt", "user_message_before", "user_message_after"],
-        "labels": ["系统提示词（不可见）", "用户消息前（可见）", "用户消息后（可见）"],
+        "labels": ["系统提示词", "用户消息前", "用户消息后"],
         "default": "system_prompt",
         "hint": "控制书架/便签/动态信息注入到 LLM 上下文的位置。系统提示词：注入不可见的 system prompt；用户消息前/后：注入到用户消息中，会出现在对话历史里。"
       },
       "custom_prompts_enabled": {
-        "description": "✏️ 启用自定义提示词",
+        "description": "启用自定义提示词",
         "type": "bool",
         "hint": "开启后可自定义各场景的提示词。关闭则使用内置默认提示词。",
         "default": false
@@ -191,6 +222,15 @@
         "type": "text",
         "hint": "打卡或书评后生成章节记忆时的提示词。章节内容、划线、对话、书评会自动拼接在后面。可用占位符：{{book_title}} = 书名，{{chapter_title}} = 章节名",
         "default": "你刚和她一起读完了《{{book_title}}》的{{chapter_title}}。\n以下是章节内容、她的划线、你们的对话和她的书评。\n请用150-200字，以第一人称总结这章的故事和你们的互动记忆。\n用普通标点符号，不要使用特殊分隔符。",
+        "condition": {
+          "custom_prompts_enabled": true
+        }
+      },
+      "prompt_bot_review": {
+        "description": "Bot 自主书评提示词",
+        "type": "text",
+        "hint": "Bot 读完一章后自主撰写书评时的提示词。章节记忆会自动拼接在前面。可用占位符：{{book_title}} = 书名，{{chapter_title}} = 章节名",
+        "default": "你刚读完了《{{book_title}}》的{{chapter_title}}。\n请写一段简短的读后感作为书评，分享你对这章的感受。\n风格要求：自然、有感情、像是随手写下的感想。50-100字。\n直接输出书评内容，不要加引号或前缀。只使用普通标点符号。",
         "condition": {
           "custom_prompts_enabled": true
         }
